@@ -1,20 +1,22 @@
-// Stateless transaction particles: every instance derives its whole life from
-// instance_index and time. They stream in from the left and are absorbed by
-// the glyph. `flow` gates how many instances are alive.
+// Mempool particles. Each slot holds (spawnTime, weight) for one real pending
+// transaction. A particle flies in from the screen edge, orbits the glyph
+// while it waits in the mempool, and spirals in when the next block lands
+// (every particle spawned before `blockAt` is doomed). Slots recycle.
 
 struct Params {
   aspect: vec2f,   // (width / height, 1)
   time: f32,
-  flow: f32,
-  pulse: f32,
+  blockAt: f32,    // clock time of the last block landing
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
+@group(1) @binding(0) var<storage, read> slots: array<vec2f>;
 
 struct VertexOut {
   @builtin(position) position: vec4f,
   @location(0) local: vec2f,
   @location(1) intensity: f32,
+  @location(2) heavy: f32,
 }
 
 fn hash(n: f32) -> f32 {
@@ -22,6 +24,8 @@ fn hash(n: f32) -> f32 {
 }
 
 const GLYPH_CENTER = vec2f(0.0, 0.10);
+const FLY_SECONDS = 2.4;
+const EAT_SECONDS = 0.85;
 
 @vertex fn vs_main(
   @builtin(vertex_index) v: u32,
@@ -32,48 +36,75 @@ const GLYPH_CENTER = vec2f(0.0, 0.10);
     vec2f(1.732, -1.0),
     vec2f(0.0, 2.0)
   );
+
+  var out: VertexOut;
+  out.position = vec4f(2.0, 2.0, 0.0, 1.0); // culled unless overwritten
+  out.local = vec2f(0.0);
+  out.intensity = 0.0;
+  out.heavy = 0.0;
+
+  let slot = slots[i];
+  let spawn = slot.x;
+  let weight = slot.y;
+  if (spawn <= 0.0 || params.time < spawn) { return out; }
+
   let fi = f32(i);
   let s1 = hash(fi);
   let s2 = hash(fi + 17.3);
   let s3 = hash(fi + 43.7);
+  let age = params.time - spawn;
 
-  var out: VertexOut;
-  if (s1 > params.flow) {
-    out.position = vec4f(2.0, 2.0, 0.0, 1.0); // culled offscreen
-    out.local = vec2f(0.0);
-    out.intensity = 0.0;
-    return out;
+  // Entry from just outside the screen edge toward a personal orbit.
+  let entryAngle = s1 * 6.28318;
+  let edge = vec2f(cos(entryAngle), sin(entryAngle));
+  let entry = GLYPH_CENTER + edge * (max(params.aspect.x, 1.0) * 0.62 + 0.15);
+  let orbitRadius = 0.18 + s2 * 0.12;
+  let orbitAngle = entryAngle + (s3 - 0.5) * 1.1 * age;
+  let wobble = 0.014 * sin(params.time * (1.2 + s2 * 2.0) + s1 * 40.0);
+  let orbit = GLYPH_CENTER +
+    vec2f(cos(orbitAngle), sin(orbitAngle)) * (orbitRadius + wobble);
+
+  let travel = 1.0 - pow(1.0 - min(age / FLY_SECONDS, 1.0), 2.4);
+  var position = mix(entry, orbit, travel);
+  var fade = smoothstep(0.0, 0.25, age);
+  var glow = 1.0;
+
+  // Spawned before the last block: this transaction is in that block.
+  if (spawn < params.blockAt) {
+    let eatStart = max(params.blockAt, spawn + FLY_SECONDS * 0.7) + s2 * 0.9;
+    if (params.time > eatStart) {
+      let eat = (params.time - eatStart) / EAT_SECONDS;
+      if (eat >= 1.0) { return out; }
+      let pull = eat * eat * (3.0 - 2.0 * eat);
+      let offset = position - GLYPH_CENTER;
+      let swirl = eat * 2.6;
+      let rotated = vec2f(
+        offset.x * cos(swirl) - offset.y * sin(swirl),
+        offset.x * sin(swirl) + offset.y * cos(swirl)
+      );
+      position = GLYPH_CENTER + rotated * (1.0 - pull);
+      glow = 1.0 + eat * 3.0;
+      fade *= 1.0 - eat * eat;
+    }
   }
 
-  let halfWidth = params.aspect.x * 0.5;
-  let duration = mix(5.0, 11.0, s2);
-  let phase = fract(params.time / duration + s3);
-
-  // Quadratic bezier from off the left edge into the glyph.
-  let start = vec2f(-halfWidth - 0.06, (s1 * 2.0 - 1.0) * 0.42);
-  let control = vec2f(-halfWidth * 0.45, start.y * 0.25 + GLYPH_CENTER.y * 0.6);
-  let goal = GLYPH_CENTER + vec2f(s2 - 0.5, s3 - 0.5) * 0.06;
-  let q = pow(phase, 0.85);
-  let position = mix(mix(start, control, q), mix(control, goal, q), q);
-
-  let fadeIn = smoothstep(0.0, 0.08, phase);
-  let absorb = smoothstep(0.94, 1.0, phase);
-  let size = (0.005 + s2 * 0.005) * (1.0 - 0.6 * absorb);
-  let approach = 1.0 + 2.4 * smoothstep(0.6, 1.0, phase);
-
+  let size = (0.006 + s2 * 0.005) * mix(1.0, 2.2, saturate(weight - 1.0));
   let scene = position + corners[v] * size;
   out.position = vec4f(scene.x * 2.0 / params.aspect.x, scene.y * 2.0, 0.0, 1.0);
   out.local = corners[v];
-  out.intensity = fadeIn * (1.0 - absorb) * approach;
+  out.intensity = fade * glow * min(weight, 1.8);
+  out.heavy = saturate(weight - 1.0);
   return out;
 }
 
 @fragment fn fs_main(
   @location(0) local: vec2f,
-  @location(1) intensity: f32
+  @location(1) intensity: f32,
+  @location(2) heavy: f32
 ) -> @location(0) vec4f {
   let falloff = max(0.0, 1.0 - length(local));
   let alpha = falloff * falloff * intensity;
-  let color = mix(vec3f(0.35, 0.48, 1.0), vec3f(0.85, 0.90, 1.0), falloff * 0.6);
-  return vec4f(color * alpha * 0.55, 1.0);
+  let cool = mix(vec3f(0.35, 0.48, 1.0), vec3f(0.85, 0.90, 1.0), falloff * 0.6);
+  let rich = vec3f(0.55, 1.0, 0.75); // high-value transactions read green
+  return vec4f(mix(cool, rich, heavy) * alpha * 0.55, 1.0);
 }

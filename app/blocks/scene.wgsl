@@ -97,17 +97,14 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32) -> f32 {
   let grid = smoothstep(0.06, 0.0, min(cell.x, cell.y));
   radiance += vec3f(0.05, 0.07, 0.13) * grid * 0.16;
 
-  // Ingress bus: a soft data beam feeding the glyph from the left.
-  let beamMask = smoothstep(0.0, -0.35, p.x - GLYPH_CENTER.x);
-  let beam = exp(-abs(p.y - GLYPH_CENTER.y) * 26.0) * beamMask;
-  radiance += LINE_COLOR * beam * params.flow * 0.10;
-
-  // The glyph. Facets get a two-tone tint like the mark itself.
+  // The glyph. Facets get a two-tone tint like the mark itself; mempool
+  // pressure (flow) charges it between blocks.
   let gd = glyphDistance(p);
   let glyphLine = lineGlow(gd, px);
   let facet = mix(VIOLET, LINE_COLOR, smoothstep(-0.05, 0.15, p.y - GLYPH_CENTER.y));
   let blockFlash = exp(-params.pulse * 2.6);
-  radiance += facet * glyphLine.y * (0.55 + params.heat * 0.5 + blockFlash);
+  radiance += facet * glyphLine.y *
+    (0.45 + params.heat * 0.5 + params.flow * 0.35 + blockFlash);
   radiance += CORE_COLOR * glyphLine.x * (0.85 + blockFlash * 0.8);
 
   // Pulse ring expanding from the glyph on each new block.

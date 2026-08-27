@@ -58,21 +58,66 @@ function toEvent(header: RawHeader, txCount: number): BlockEvent {
   };
 }
 
+const SAMPLE_GAP_MS = 1500;
+const SYNTH_MIN_RATE = 5; // synthetic arrivals per second floor while polling
+
 export function createBlockFeed(handlers: {
   onBlock(block: BlockEvent): void;
   onStatus(status: FeedStatus): void;
+  /** One call per pending transaction; weight in [1, 2.4] scales by ETH value. */
+  onPendingTx(weight: number): void;
 }): () => void {
   let disposed = false;
   let ws: WebSocket | undefined;
   let wsLive = false;
   let pollTimer: number | undefined;
   let guardTimer: number | undefined;
+  let synthTimer: number | undefined;
   let lastNumber = 0;
+  let lastTxCount = 150;
+  let headsSubId = "";
+  let pendingSubId = "";
+  let lastSampleAt = 0;
 
   const emit = (event: BlockEvent) => {
     if (disposed || event.number <= lastNumber) return;
     lastNumber = event.number;
+    lastTxCount = Math.max(1, event.txCount);
     handlers.onBlock(event);
+  };
+
+  // Most arrivals spawn immediately at weight 1; at most one value lookup is
+  // in flight, so heavy mempool traffic never floods the RPC.
+  const emitPending = (hash: string) => {
+    if (disposed) return;
+    const nowMs = Date.now();
+    if (nowMs - lastSampleAt < SAMPLE_GAP_MS) {
+      handlers.onPendingTx(1);
+      return;
+    }
+    lastSampleAt = nowMs;
+    rpc<{ value?: string }>("eth_getTransactionByHash", [hash])
+      .then((tx) => {
+        const eth = hex(tx?.value) / 1e18;
+        handlers.onPendingTx(1 + Math.min(1.4, Math.log10(1 + eth) * 1.2));
+      })
+      .catch(() => handlers.onPendingTx(1));
+  };
+
+  // Polling has no mempool stream, so synthesize arrivals at the pace of the
+  // last block. ponytail: fake cadence, real volume; WS is the honest path.
+  const startSynth = () => {
+    if (disposed || synthTimer !== undefined) return;
+    const perSecond = Math.max(SYNTH_MIN_RATE, lastTxCount / 12);
+    synthTimer = window.setInterval(
+      () => handlers.onPendingTx(1),
+      1000 / perSecond
+    );
+  };
+
+  const stopSynth = () => {
+    clearInterval(synthTimer);
+    synthTimer = undefined;
   };
 
   const pollLatest = async () => {
@@ -90,6 +135,7 @@ export function createBlockFeed(handlers: {
     };
     tick();
     pollTimer = window.setInterval(tick, POLL_MS);
+    startSynth();
   };
 
   const startWs = () => {
@@ -103,28 +149,43 @@ export function createBlockFeed(handlers: {
       if (!wsLive) ws?.close();
     }, WS_GUARD_MS);
     ws.onopen = () => {
-      ws?.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "eth_subscribe",
-          params: ["newHeads"],
-        })
-      );
+      const subscribe = (id: number, topic: string) =>
+        ws?.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "eth_subscribe",
+            params: [topic],
+          })
+        );
+      subscribe(1, "newHeads");
+      subscribe(2, "newPendingTransactions");
     };
     ws.onmessage = (message: MessageEvent<string>) => {
       const payload = JSON.parse(message.data) as {
         id?: number;
         method?: string;
-        params?: { result: RawHeader };
+        result?: string;
+        params?: { subscription: string; result: RawHeader | string };
       };
-      if (payload.id === 1) {
+      if (payload.id === 1 && payload.result) {
+        headsSubId = payload.result;
         wsLive = true;
+        stopSynth();
         if (!disposed) handlers.onStatus("live");
         return;
       }
+      if (payload.id === 2 && payload.result) {
+        pendingSubId = payload.result;
+        return;
+      }
       if (payload.method !== "eth_subscription" || !payload.params) return;
-      const header = payload.params.result;
+      if (payload.params.subscription === pendingSubId) {
+        emitPending(payload.params.result as string);
+        return;
+      }
+      if (payload.params.subscription !== headsSubId) return;
+      const header = payload.params.result as RawHeader;
       rpc<string>("eth_getBlockTransactionCountByHash", [header.hash])
         .then((count) => emit(toEvent(header, hex(count))))
         .catch(() => emit(toEvent(header, 0)));
@@ -144,6 +205,7 @@ export function createBlockFeed(handlers: {
     disposed = true;
     clearTimeout(guardTimer);
     clearInterval(pollTimer);
+    stopSynth();
     ws?.close();
   };
 }

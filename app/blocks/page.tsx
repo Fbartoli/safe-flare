@@ -26,6 +26,7 @@ const STATUS_COLOR: Record<FeedStatus, string> = {
 export default function BlocksPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelHostRef = useRef<HTMLDivElement>(null);
+  const statsRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<FeedStatus>("connecting");
   const [latest, setLatest] = useState<BlockEvent | undefined>();
 
@@ -67,12 +68,22 @@ export default function BlocksPage() {
       }
     });
 
+    renderer.onStats((stats) => {
+      if (statsRef.current) {
+        statsRef.current.textContent =
+          `mempool +${stats.sinceBlock} since block · ~${stats.perSecond.toFixed(1)} tx/s`;
+      }
+    });
+
     const stopFeed = createBlockFeed({
       onBlock(block) {
         renderer.pushBlock(block);
         setLatest(block);
       },
       onStatus: setStatus,
+      onPendingTx(weight) {
+        renderer.pushPendingTx(weight);
+      },
     });
 
     return () => {
@@ -124,6 +135,7 @@ export default function BlocksPage() {
             ? `#${latest.number} · ${latest.txCount} txs · gas ${gasPercent}% · base ${latest.baseFeeGwei.toFixed(2)} gwei`
             : "waiting for the chain…"}
         </div>
+        <div ref={statsRef}>mempool warming up…</div>
       </header>
       <Link
         href="/"

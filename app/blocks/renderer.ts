@@ -1,5 +1,6 @@
 import { clock, draw, effect, frameLoop, init, surface } from "vgpu";
 import type { Draw, Effect, FrameLoopHandle, Gpu, Surface } from "vgpu";
+import { StorageBuffer } from "vgpu/core";
 
 import type { BlockEvent } from "./eth-feed";
 import particlesWgsl from "./particles.wgsl";
@@ -15,10 +16,20 @@ export interface BlockLabel {
   opacity: number;
 }
 
+export interface MempoolStats {
+  /** Pending transactions seen since the last block. */
+  sinceBlock: number;
+  /** Smoothed arrival rate in transactions per second. */
+  perSecond: number;
+}
+
 export interface BlocksRenderer {
   ready: Promise<void>;
   pushBlock(block: BlockEvent): void;
+  /** One real pending transaction; weight in [1, 2.4] scales the particle. */
+  pushPendingTx(weight: number): void;
   onLayout(callback: (labels: BlockLabel[]) => void): void;
+  onStats(callback: (stats: MempoolStats) => void): void;
   dispose(): void;
 }
 
@@ -34,8 +45,9 @@ const CONVEYOR_Y = -0.34;
 const SLOT_START = 0.3;
 const SLOT_SPACING = 0.17;
 const SPAWN_X = 0.05;
-const PARTICLE_COUNT = 900;
-
+const PARTICLE_SLOTS = 1024;
+const MIN_SPAWN_GAP = 0.01; // seconds between visible spawns; extras only count
+const STATS_INTERVAL = 0.25;
 
 export function createBlocksRenderer({
   canvas,
@@ -46,21 +58,45 @@ export function createBlocksRenderer({
   let gpu: Gpu | undefined;
   let loop: FrameLoopHandle | undefined;
   let layoutCallback: ((labels: BlockLabel[]) => void) | undefined;
+  let statsCallback: ((stats: MempoolStats) => void) | undefined;
 
   const anims: BlockAnim[] = [];
   let lastBlockAt = -100;
   let now = 0;
-  let flow = 0.25;
-  let targetFlow = 0.25;
   let heat = 0.4;
   let targetHeat = 0.4;
+
+  const slotData = new Float32Array(PARTICLE_SLOTS * 2);
+  let slotsDirty = false;
+  let ring = 0;
+  let lastSpawnAt = -1;
+  let sinceBlock = 0;
+  let arrivalGapEma = 0.5;
+  let lastArrivalAt = 0;
+  let lastStatsAt = 0;
+
+  const pushPendingTx = (weight: number) => {
+    if (disposed) return;
+    sinceBlock += 1;
+    if (lastArrivalAt > 0) {
+      const gap = Math.min(5, now - lastArrivalAt);
+      arrivalGapEma = arrivalGapEma * 0.9 + gap * 0.1;
+    }
+    lastArrivalAt = now;
+    if (now - lastSpawnAt < MIN_SPAWN_GAP) return; // counted, not drawn
+    lastSpawnAt = now;
+    slotData[ring * 2] = now;
+    slotData[ring * 2 + 1] = weight;
+    ring = (ring + 1) % PARTICLE_SLOTS;
+    slotsDirty = true;
+  };
 
   const pushBlock = (block: BlockEvent) => {
     if (anims.some((anim) => anim.block.number === block.number)) return;
     anims.unshift({ block, x: SPAWN_X, scale: 0, bornAt: now });
     if (anims.length > MAX_BLOCKS) anims.pop();
     lastBlockAt = now;
-    targetFlow = Math.min(1, block.txCount / 250) * 0.85 + 0.15;
+    sinceBlock = 0;
     targetHeat = block.gasLimit > 0 ? block.gasUsed / block.gasLimit : 0.4;
   };
 
@@ -74,10 +110,17 @@ export function createBlocksRenderer({
     const scene: Effect = effect(gpu, sceneWgsl, { label: "eth-blocks-scene" });
     const particles: Draw = draw(gpu, {
       shader: particlesWgsl,
-      instances: PARTICLE_COUNT,
+      instances: PARTICLE_SLOTS,
       blend: "additive",
       label: "eth-blocks-particles",
     });
+    const slots = new StorageBuffer(gpu.device, {
+      size: slotData.byteLength,
+      label: "eth-blocks-mempool-slots",
+      visibility: GPUShaderStage.VERTEX,
+      bindGroupLayout: particles.layout(1),
+    });
+    particles.set({ slots });
 
     const time = clock(gpu);
     let lastTime = 0;
@@ -90,7 +133,6 @@ export function createBlocksRenderer({
       const aspect = texel[1] / texel[0]; // (1/h) / (1/w) = w/h
       const halfWidth = aspect / 2;
 
-      flow += (targetFlow - flow) * Math.min(1, dt * 1.5);
       heat += (targetHeat - heat) * Math.min(1, dt * 1.5);
 
       const cubes: number[][] = [];
@@ -115,7 +157,13 @@ export function createBlocksRenderer({
       });
       while (cubes.length < MAX_BLOCKS) cubes.push([0, 0, 0, 0]);
 
+      if (slotsDirty) {
+        slots.write(slotData);
+        slotsDirty = false;
+      }
+
       const pulse = Math.min(10, now - lastBlockAt);
+      const flow = Math.min(1, sinceBlock / 250);
       scene.set({
         params: { aspect: [aspect, 1], time: now, pulse, heat, flow },
         blocks: {
@@ -123,7 +171,9 @@ export function createBlocksRenderer({
           b5: cubes[5], b6: cubes[6], b7: cubes[7], b8: cubes[8], b9: cubes[9],
         },
       });
-      particles.set({ params: { aspect: [aspect, 1], time: now, flow, pulse } });
+      particles.set({
+        params: { aspect: [aspect, 1], time: now, blockAt: lastBlockAt },
+      });
 
       frame.pass({ target: output, clear: [0, 0, 0, 1] }, (pass) => {
         pass.draw(scene);
@@ -131,6 +181,13 @@ export function createBlocksRenderer({
       });
 
       layoutCallback?.(labels);
+      if (now - lastStatsAt >= STATS_INTERVAL) {
+        lastStatsAt = now;
+        statsCallback?.({
+          sinceBlock,
+          perSecond: lastArrivalAt > 0 ? 1 / Math.max(arrivalGapEma, 0.02) : 0,
+        });
+      }
     });
   };
 
@@ -139,8 +196,12 @@ export function createBlocksRenderer({
   return {
     ready,
     pushBlock,
+    pushPendingTx,
     onLayout(callback) {
       layoutCallback = callback;
+    },
+    onStats(callback) {
+      statsCallback = callback;
     },
     dispose() {
       disposed = true;
