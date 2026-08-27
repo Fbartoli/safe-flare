@@ -436,6 +436,9 @@ export default function BlocksPage() {
         >
           sound: {soundOn ? "on" : "off"}
         </button>
+        <Link href="/strange" style={{ color: "#8a92b2", textDecoration: "none" }}>
+          strange →
+        </Link>
         <Link href="/" style={{ color: "#8a92b2", textDecoration: "none" }}>
           ← safe flare
         </Link>
