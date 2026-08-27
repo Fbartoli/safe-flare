@@ -42,6 +42,17 @@ shows smoothed per-pass GPU milliseconds from timestamp queries.
 `public/og.png` is rendered headless by the same shaders:
 `node scripts/render-og.mjs`.
 
+## /strange — a living attractor
+
+`/strange` iterates a Clifford attractor — x' = sin(a·y) + c·cos(a·x),
+y' = sin(b·x) + d·cos(b·y) — over 262,144 points in a compute shader. Each
+point splats an additive HDR dot; trails accumulate in a ping-pong buffer
+with slow decay and resolve through the same bloom and grain chain. The
+coefficients walk a loop of known-good preset sets with long dwells and fast
+transits, so the sculpture never stops morphing and never repeats. Move the
+pointer to bend the map itself; click to scatter every point and watch the
+cloud collapse back onto the attractor.
+
 ## Stack
 
 - [Next.js 16](https://nextjs.org/) (App Router, Turbopack)

@@ -4,7 +4,7 @@ import {
 import type { Draw, Effect, FrameLoopHandle, Gpu, Surface, Target } from "vgpu";
 import { StorageBuffer } from "vgpu/core";
 
-import { BLUE_NOISE_SIZE, blueNoiseBytes } from "../flare/blue-noise-128";
+import { createBlueNoiseTexture } from "../flare/blue-noise-texture";
 import blurWgsl from "../flare/blur.wgsl";
 import {
   BEACON_GENESIS,
@@ -136,30 +136,6 @@ function artFromHash(hash?: string): number[] {
   );
 }
 
-function createBlueNoiseTexture(gpu: Gpu): GPUTexture {
-  const texture = gpu.gpu.createTexture({
-    label: "eth-blocks-blue-noise-128",
-    size: [BLUE_NOISE_SIZE, BLUE_NOISE_SIZE],
-    format: "r8unorm",
-    usage: 0x02 | 0x04,
-  });
-  const bytesPerRow = 256;
-  const source = blueNoiseBytes();
-  const padded = new Uint8Array(bytesPerRow * BLUE_NOISE_SIZE);
-  for (let row = 0; row < BLUE_NOISE_SIZE; row += 1) {
-    padded.set(
-      source.subarray(row * BLUE_NOISE_SIZE, (row + 1) * BLUE_NOISE_SIZE),
-      row * bytesPerRow
-    );
-  }
-  gpu.gpu.queue.writeTexture(
-    { texture },
-    padded,
-    { bytesPerRow, rowsPerImage: BLUE_NOISE_SIZE },
-    [BLUE_NOISE_SIZE, BLUE_NOISE_SIZE]
-  );
-  return texture;
-}
 
 export function createBlocksRenderer({
   canvas,
