@@ -13,6 +13,7 @@ import {
 } from "./eth-feed";
 import {
   createBlocksRenderer,
+  type BlockLabel,
   type LayoutFrame,
   type MempoolStats,
 } from "./renderer";
@@ -54,6 +55,78 @@ function slotClock(): SlotClock {
   };
 }
 
+function blockLabelHtml(label: BlockLabel): { compact: string; full: string } {
+  const compact =
+    `<div style="color:#c7d0f0">#${label.number}</div>` +
+    `<div>${label.txCount} txs</div>` +
+    (label.proposer !== undefined
+      ? `<div style="color:#5a6180">val ${label.proposer}</div>`
+      : "");
+  const detail =
+    (label.gasPercent !== undefined ? `<div>gas ${label.gasPercent}%</div>` : "") +
+    (label.baseFeeGwei !== undefined
+      ? `<div>base ${label.baseFeeGwei.toFixed(2)} gwei</div>`
+      : "") +
+    (label.blobs ? `<div>${label.blobs} blobs</div>` : "") +
+    (label.hash
+      ? `<div style="color:#5a6180">${label.hash.slice(0, 10)}…${label.hash.slice(-4)}</div>`
+      : "");
+  return { compact, full: compact + detail };
+}
+
+// Hovering a block label expands it with the full block detail.
+function attachHoverDetail(node: HTMLElement) {
+  node.addEventListener("pointerenter", () => {
+    node.dataset.hover = "1";
+    if (node.dataset.full) node.innerHTML = node.dataset.full;
+    node.style.background = "rgba(8,10,20,0.92)";
+    node.style.padding = "5px 8px";
+    node.style.border = "1px solid #2a3152";
+    node.style.borderRadius = "4px";
+  });
+  node.addEventListener("pointerleave", () => {
+    delete node.dataset.hover;
+    if (node.dataset.compact) node.innerHTML = node.dataset.compact;
+    node.style.background = "none";
+    node.style.padding = "0";
+    node.style.border = "none";
+  });
+}
+
+// A 32 px isometric cube in a hash-derived hue; the tab reports each block.
+function updateFavicon(hash: string) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 32;
+  canvas.height = 32;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.fillStyle = "#05060c";
+  ctx.fillRect(0, 0, 32, 32);
+  ctx.strokeStyle = `hsl(${parseInt(hash.slice(2, 8), 16) % 360} 85% 70%)`;
+  ctx.lineWidth = 2;
+  const points: Array<[number, number]> = [];
+  for (let k = 0; k < 6; k++) {
+    const angle = (Math.PI / 180) * (90 + 60 * k);
+    points.push([16 + 11 * Math.cos(angle), 16 - 11 * Math.sin(angle)]);
+  }
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (const [x, y] of points.slice(1)) ctx.lineTo(x, y);
+  ctx.closePath();
+  for (const k of [1, 3, 5]) {
+    ctx.moveTo(16, 16);
+    ctx.lineTo(points[k][0], points[k][1]);
+  }
+  ctx.stroke();
+  let icon = document.querySelector<HTMLLinkElement>("link[rel='icon']");
+  if (!icon) {
+    icon = document.createElement("link");
+    icon.rel = "icon";
+    document.head.appendChild(icon);
+  }
+  icon.href = canvas.toDataURL("image/png");
+}
+
 export default function BlocksPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelHostRef = useRef<HTMLDivElement>(null);
@@ -63,6 +136,10 @@ export default function BlocksPage() {
   const [finalized, setFinalized] = useState<number | undefined>();
   const [soundOn, setSoundOn] = useState(false);
   const [slotNow, setSlotNow] = useState<SlotClock | undefined>();
+  const [embed, setEmbed] = useState(false);
+  const [hudOn, setHudOn] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const perfRef = useRef<HTMLDivElement>(null);
   const soundRef = useRef<SoundBoard | undefined>(undefined);
 
   useEffect(() => {
@@ -76,15 +153,19 @@ export default function BlocksPage() {
     const labelHost = labelHostRef.current;
     if (!canvas || !labelHost) return;
 
-    // Playground hooks: ?whale=0.5 lowers the whale threshold,
-    // ?ghost=5 shortens the missed-slot timer.
+    // Playground hooks: ?whale=0.5 lowers the whale threshold, ?ghost=5
+    // shortens the missed-slot timer, ?embed=1 strips the chrome for
+    // iframes, ?hud=1 shows per-pass GPU milliseconds.
     const query = new URLSearchParams(window.location.search);
     const whaleThreshold = Number(query.get("whale")) || undefined;
     const ghostAfter = Number(query.get("ghost")) || undefined;
+    const hudMode = query.get("hud") === "1";
+    setEmbed(query.get("embed") === "1");
+    setHudOn(hudMode);
 
     const sound = createSoundBoard();
     soundRef.current = sound;
-    const renderer = createBlocksRenderer({ canvas, ghostAfter });
+    const renderer = createBlocksRenderer({ canvas, ghostAfter, hud: hudMode });
     void renderer.ready;
 
     const blockPool = new Map<string, HTMLElement>();
@@ -102,6 +183,7 @@ export default function BlocksPage() {
             anchor.rel = "noreferrer";
             anchor.style.cssText =
               LABEL_STYLE + `color:#8a92b2;pointer-events:auto;text-decoration:none;`;
+            attachHoverDetail(anchor);
             node = anchor;
           } else {
             node = document.createElement("div");
@@ -114,15 +196,15 @@ export default function BlocksPage() {
         if (label.kind === "block") {
           // Content arrives in stages (tx count retry, proposer lookup);
           // rewrite only when the signature changes.
-          const sig = `${label.number}|${label.txCount}|${label.proposer ?? ""}`;
+          const sig =
+            `${label.number}|${label.txCount}|${label.proposer ?? ""}|` +
+            `${label.gasPercent ?? ""}`;
           if (node.dataset.sig !== sig) {
             node.dataset.sig = sig;
-            node.innerHTML =
-              `<div style="color:#c7d0f0">#${label.number}</div>` +
-              `<div>${label.txCount} txs</div>` +
-              (label.proposer !== undefined
-                ? `<div style="color:#5a6180">val ${label.proposer}</div>`
-                : "");
+            const html = blockLabelHtml(label);
+            node.dataset.compact = html.compact;
+            node.dataset.full = html.full;
+            node.innerHTML = node.dataset.hover === "1" ? html.full : html.compact;
           }
         }
         node.style.left = `${label.u * 100}%`;
@@ -160,12 +242,22 @@ export default function BlocksPage() {
       }
     });
 
+    renderer.onPerf((spans) => {
+      if (!perfRef.current) return;
+      const parts = Object.entries(spans).map(
+        ([name, ms]) => `${name} ${ms.toFixed(2)}`
+      );
+      perfRef.current.textContent = `gpu ms · ${parts.join(" · ")}`;
+    });
+
     const stopFeed = createBlockFeed(
       {
         onBlock(block) {
           renderer.pushBlock(block);
           setLatest(block);
           sound.thump(Math.min(1, block.txCount / 400));
+          document.title = `#${block.number} · eth blocks`;
+          updateFavicon(block.hash);
         },
         onStatus: setStatus,
         onPendingTx(weight) {
@@ -192,7 +284,19 @@ export default function BlocksPage() {
       { whaleThreshold }
     );
 
+    // Easter egg: a click on the glyph summons a swarm.
+    const handleCanvasClick = (event: MouseEvent) => {
+      const aspect = window.innerWidth / window.innerHeight;
+      const dx = (event.clientX / window.innerWidth - 0.5) * aspect;
+      const dy = 0.5 - event.clientY / window.innerHeight - 0.1;
+      if (dx * dx + dy * dy > 0.07) return;
+      renderer.burst();
+      sound.thump(1);
+    };
+    canvas.addEventListener("click", handleCanvasClick);
+
     return () => {
+      canvas.removeEventListener("click", handleCanvasClick);
       stopFeed();
       renderer.dispose();
       sound.dispose();
@@ -203,6 +307,36 @@ export default function BlocksPage() {
   const gasPercent = latest && latest.gasLimit > 0
     ? Math.round((latest.gasUsed / latest.gasLimit) * 100)
     : undefined;
+
+  const startCapture = () => {
+    const canvas = canvasRef.current;
+    if (!canvas || capturing) return;
+    const stream = canvas.captureStream(60);
+    const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+      ? "video/webm;codecs=vp9"
+      : "video/webm";
+    const recorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: 12_000_000,
+    });
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onstop = () => {
+      const url = URL.createObjectURL(new Blob(chunks, { type: "video/webm" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `eth-blocks-${Date.now()}.webm`;
+      link.click();
+      URL.revokeObjectURL(url);
+      for (const track of stream.getTracks()) track.stop();
+      setCapturing(false);
+    };
+    recorder.start();
+    setCapturing(true);
+    window.setTimeout(() => recorder.stop(), SLOT_SECONDS * 1000);
+  };
 
   return (
     <main
@@ -221,6 +355,7 @@ export default function BlocksPage() {
         ref={labelHostRef}
         style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
       />
+      {!embed && (
       <header
         style={{
           position: "absolute",
@@ -258,6 +393,8 @@ export default function BlocksPage() {
             : "finality pending…"}
         </div>
       </header>
+      )}
+      {!embed && (
       <div
         style={{
           position: "absolute",
@@ -269,6 +406,21 @@ export default function BlocksPage() {
           fontSize: 12,
         }}
       >
+        <button
+          type="button"
+          onClick={startCapture}
+          style={{
+            background: "none",
+            border: "none",
+            padding: 0,
+            fontFamily: MONO,
+            fontSize: 12,
+            color: capturing ? "#c7d0f0" : "#8a92b2",
+            cursor: "pointer",
+          }}
+        >
+          {capturing ? "capturing…" : "capture 12s"}
+        </button>
         <button
           type="button"
           onClick={() => setSoundOn(soundRef.current?.toggle() ?? false)}
@@ -288,6 +440,21 @@ export default function BlocksPage() {
           ← safe flare
         </Link>
       </div>
+      )}
+      {hudOn && (
+        <div
+          ref={perfRef}
+          style={{
+            position: "absolute",
+            bottom: 12,
+            right: 20,
+            fontFamily: MONO,
+            fontSize: 11,
+            color: "#5a6180",
+            pointerEvents: "none",
+          }}
+        />
+      )}
     </main>
   );
 }

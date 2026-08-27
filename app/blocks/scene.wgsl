@@ -12,13 +12,15 @@ struct Params {
   heat: f32,       // gasUsed / gasLimit of the last block
   flow: f32,       // normalized mempool pressure
   surge: f32,      // last block's tx count, normalized
+  epochPulse: f32, // seconds since the last 32-slot epoch boundary
   feeCount: f32,   // valid sparkline samples
 }
 
 // One vec4 per conveyor block:
 // (x, scale, glow, blobs + finalized * 16 + reorg * 32).
-// A negative scale marks a missed-slot ghost.
-struct Blocks { data: array<vec4f, 10> }
+// A negative scale marks a missed-slot ghost. `art` carries four hash-derived
+// lanes in [0, 1) that seed the per-block constellation.
+struct Blocks { data: array<vec4f, 10>, art: array<vec4f, 10> }
 
 // One vec4 per whale transaction: (x, y, intensity, size).
 struct Whales { data: array<vec4f, 4> }
@@ -136,6 +138,12 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
   let ring = exp(-abs(length(arm) - ringRadius) * 70.0) * exp(-params.pulse * 2.1);
   radiance += VIOLET * ring * (0.4 + params.surge);
 
+  // Epoch tick: a wider, slower ring on each 32-slot boundary.
+  let epochRadius = 0.06 + params.epochPulse * 0.22;
+  let epochRing = exp(-abs(length(arm) - epochRadius) * 26.0) *
+    exp(-params.epochPulse * 0.75);
+  radiance += VIOLET * epochRing * 0.35;
+
   // Conveyor line from the glyph to the right edge.
   let convStart = vec2f(0.17, CONVEYOR_Y);
   let convEnd = vec2f(params.aspect.x * 0.5 + 0.2, CONVEYOR_Y);
@@ -154,7 +162,8 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
     let flags = cube.w - select(0.0, 32.0, reorged);
     let finalized = flags >= 16.0;
     let blobCount = flags - select(0.0, 16.0, finalized);
-    let d = cubeDistance(pBelt, center, 0.055 * scale, ghost);
+    let csize = 0.055 * scale;
+    let d = cubeDistance(pBelt, center, csize, ghost);
     let line = lineGlow(d, px);
     if (ghost) {
       radiance += LINE_COLOR * 0.35 * (line.x * 0.30 + line.y * 0.06);
@@ -182,6 +191,22 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
         vec2f((f32(k) - (min(blobCount, 8.0) - 1.0) * 0.5) * 0.022, -0.085 * scale - 0.028);
       let od = length(pBelt - orb);
       radiance += VIOLET * exp(-od * 260.0) * (0.5 + cube.z * 0.6);
+    }
+    // Block-hash constellation: a four-node trace no other block ever had.
+    let art = blocks.art[i];
+    if (length(pBelt - center) < csize * 1.4 && art.x + art.y > 0.0) {
+      var prev = vec2f(0.0);
+      for (var k = 0; k < 4; k++) {
+        let lane = art[k];
+        let node = center +
+          (vec2f(fract(lane * 13.73), fract(lane * 47.19)) - 0.5) * csize;
+        radiance += WHALE_COLOR * exp(-length(pBelt - node) * 900.0) *
+          (0.35 + cube.z * 0.5);
+        if (k > 0) {
+          radiance += WHALE_COLOR * exp(-sdSegment(pBelt, prev, node) * 500.0) * 0.10;
+        }
+        prev = node;
+      }
     }
   }
 

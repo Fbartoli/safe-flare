@@ -1,10 +1,17 @@
-import { clock, draw, effect, frameLoop, init, sampler, surface, target } from "vgpu";
+import {
+  clock, draw, effect, frameLoop, init, sampler, surface, target, timer,
+} from "vgpu";
 import type { Draw, Effect, FrameLoopHandle, Gpu, Surface, Target } from "vgpu";
 import { StorageBuffer } from "vgpu/core";
 
 import { BLUE_NOISE_SIZE, blueNoiseBytes } from "../flare/blue-noise-128";
 import blurWgsl from "../flare/blur.wgsl";
-import { SLOT_SECONDS, type BlockEvent } from "./eth-feed";
+import {
+  BEACON_GENESIS,
+  SLOTS_PER_EPOCH,
+  SLOT_SECONDS,
+  type BlockEvent,
+} from "./eth-feed";
 import compositeWgsl from "./composite.wgsl";
 import particlesWgsl from "./particles.wgsl";
 import sceneWgsl from "./scene.wgsl";
@@ -14,6 +21,10 @@ export interface BlockLabel {
   number: number;
   txCount: number;
   proposer?: number;
+  gasPercent?: number;
+  baseFeeGwei?: number;
+  blobs?: number;
+  hash?: string;
   /** Horizontal position as a fraction of the canvas width. */
   u: number;
   /** Vertical position as a fraction of the canvas height. */
@@ -48,6 +59,8 @@ export interface BlocksRenderer {
   pushPendingTx(weight: number): void;
   /** A sampled whale transaction; becomes a labeled green orb. */
   pushWhale(valueEth: number): void;
+  /** Glyph easter egg: a staggered swarm of synthetic particles. */
+  burst(count?: number): void;
   setFinalized(blockNumber: number): void;
   setProposer(blockNumber: number, validatorIndex: number): void;
   /** Reorg: replace the cube at this height and flash it red. */
@@ -56,6 +69,8 @@ export interface BlocksRenderer {
   setFeeHistory(baseFeesGwei: number[]): void;
   onLayout(callback: (layout: LayoutFrame) => void): void;
   onStats(callback: (stats: MempoolStats) => void): void;
+  /** Smoothed per-pass GPU milliseconds; fires only with `hud` enabled. */
+  onPerf(callback: (spans: Record<string, number>) => void): void;
   dispose(): void;
 }
 
@@ -113,6 +128,14 @@ function easeOutBack(x: number): number {
   return 1 + (c1 + 1) * t * t * t + c1 * t * t;
 }
 
+// Four hash-derived lanes in [0, 1) seeding the per-block constellation.
+function artFromHash(hash?: string): number[] {
+  if (!hash) return [0, 0, 0, 0];
+  return [0, 1, 2, 3].map(
+    (k) => parseInt(hash.slice(2 + k * 8, 10 + k * 8), 16) / 0xffffffff
+  );
+}
+
 function createBlueNoiseTexture(gpu: Gpu): GPUTexture {
   const texture = gpu.gpu.createTexture({
     label: "eth-blocks-blue-noise-128",
@@ -141,16 +164,22 @@ function createBlueNoiseTexture(gpu: Gpu): GPUTexture {
 export function createBlocksRenderer({
   canvas,
   ghostAfter = GHOST_AFTER,
+  hud = false,
 }: {
   readonly canvas: HTMLCanvasElement;
   /** Seconds without a head before a missed-slot ghost spawns (test hook). */
   readonly ghostAfter?: number;
+  /** Request timestamp queries and report per-pass GPU times. */
+  readonly hud?: boolean;
 }): BlocksRenderer {
   let disposed = false;
   let gpu: Gpu | undefined;
   let loop: FrameLoopHandle | undefined;
   let layoutCallback: ((layout: LayoutFrame) => void) | undefined;
   let statsCallback: ((stats: MempoolStats) => void) | undefined;
+  let perfCallback: ((spans: Record<string, number>) => void) | undefined;
+  const perfEma: Record<string, number> = {};
+  let lastPerfAt = 0;
 
   const anims: BlockAnim[] = [];
   const whaleAnims: WhaleAnim[] = [];
@@ -175,7 +204,9 @@ export function createBlocksRenderer({
 
   const parallax = [0, 0];
   const parallaxTarget = [0, 0];
+  let pointerSeen = false;
   const handlePointerMove = (event: PointerEvent) => {
+    pointerSeen = true;
     parallaxTarget[0] = (event.clientX / window.innerWidth) * 2 - 1;
     parallaxTarget[1] = -((event.clientY / window.innerHeight) * 2 - 1);
   };
@@ -218,6 +249,16 @@ export function createBlocksRenderer({
     slotsDirty = true;
   };
 
+  const burst = (count = 48) => {
+    if (disposed) return;
+    for (let k = 0; k < count; k++) {
+      slotData[ring * 2] = now + Math.random() * 0.6;
+      slotData[ring * 2 + 1] = 1 + Math.random() * 1.4;
+      ring = (ring + 1) % PARTICLE_SLOTS;
+    }
+    slotsDirty = true;
+  };
+
   const pushBlock = (block: BlockEvent) => {
     if (anims.some((anim) => anim.block?.number === block.number)) return;
     anims.unshift({ kind: "block", block, x: SPAWN_X, bornAt: now, finalized: false });
@@ -253,7 +294,12 @@ export function createBlocksRenderer({
   };
 
   const initialize = async () => {
-    gpu = await init({ label: "eth-blocks" });
+    gpu = hud
+      ? await init({
+          label: "eth-blocks",
+          requiredFeatures: ["timestamp-query"],
+        }).catch(() => init({ label: "eth-blocks" }))
+      : await init({ label: "eth-blocks" });
     if (disposed) {
       gpu.dispose();
       return;
@@ -341,6 +387,17 @@ export function createBlocksRenderer({
     document.addEventListener("visibilitychange", handleVisibility);
 
     const time = clock(gpu);
+    const gpuTimer =
+      hud && gpu.device.features.has("timestamp-query") ? timer(gpu) : undefined;
+    gpuTimer?.onResults((spans) => {
+      for (const [name, ms] of Object.entries(spans)) {
+        perfEma[name] = (perfEma[name] ?? ms) * 0.9 + ms * 0.1;
+      }
+      if (now - lastPerfAt >= STATS_INTERVAL) {
+        lastPerfAt = now;
+        perfCallback?.({ ...perfEma });
+      }
+    });
     let lastTime = 0;
     loop = frameLoop(gpu, (frame) => {
       now = time.time;
@@ -370,6 +427,7 @@ export function createBlocksRenderer({
       }
 
       const cubes: number[][] = [];
+      const arts: number[][] = [];
       const blockLabels: BlockLabel[] = [];
       for (let index = anims.length - 1; index >= 0; index--) {
         if (anims[index].x > halfWidth + 0.15) anims.splice(index, 1);
@@ -393,17 +451,26 @@ export function createBlocksRenderer({
           glow,
           packed,
         ]);
+        arts.push(artFromHash(anim.block?.hash));
         blockLabels.push({
           kind: anim.kind,
           number: anim.block?.number ?? 0,
           txCount: anim.block?.txCount ?? 0,
           proposer: anim.proposer,
+          gasPercent:
+            anim.block && anim.block.gasLimit > 0
+              ? Math.round((anim.block.gasUsed / anim.block.gasLimit) * 100)
+              : undefined,
+          baseFeeGwei: anim.block?.baseFeeGwei,
+          blobs: anim.block?.blobs,
+          hash: anim.block?.hash,
           u: 0.5 + anim.x / aspect,
           v: 0.5 - (CONVEYOR_Y + 0.115),
           opacity: Math.min(1, stamp) * edgeFade,
         });
       });
       while (cubes.length < MAX_BLOCKS) cubes.push([0, 0, 0, 0]);
+      while (arts.length < MAX_BLOCKS) arts.push([0, 0, 0, 0]);
 
       // Whales drift in from the left, hold near the glyph, and get eaten
       // with everything else when the block lands.
@@ -449,6 +516,10 @@ export function createBlocksRenderer({
       }
 
       const pulse = Math.min(30, now - lastBlockAt);
+      const epochPulse = Math.min(
+        30,
+        (Date.now() / 1000 - BEACON_GENESIS) % (SLOT_SECONDS * SLOTS_PER_EPOCH)
+      );
       pressure += (Math.min(1, sinceBlock / 250) - pressure) * Math.min(1, dt * 1.2);
       const feeVecs: number[][] = [];
       let feeMin = Infinity;
@@ -473,26 +544,40 @@ export function createBlocksRenderer({
           heat,
           flow: pressure,
           surge,
+          epochPulse,
           feeCount: feesGwei.length,
         },
-        blocks: { data: cubes },
+        blocks: { data: cubes, art: arts },
         whales: { data: whaleUniform },
         fees: { data: feeVecs },
       });
       particles.set({
-        params: { aspect: [aspect, 1], time: now, blockAt: lastBlockAt, pressure },
+        params: {
+          aspect: [aspect, 1],
+          time: now,
+          blockAt: lastBlockAt,
+          pressure,
+          pointer: [
+            parallaxTarget[0] * aspect * 0.5,
+            parallaxTarget[1] * 0.5,
+          ],
+          well: pointerSeen ? 1 : 0,
+        },
       });
       composite.set({
         params: { aspect: [aspect, 1], frameIndex, bloomStrength: BLOOM_STRENGTH },
       });
 
-      frame.pass({ target: sceneTarget!, clear: [0, 0, 0, 1] }, (pass) => {
-        pass.draw(scene);
-        pass.draw(particles);
-      });
-      frame.pass(bloomA!, blurH);
-      frame.pass(bloomB!, blurV);
-      frame.pass(output, composite);
+      frame.pass(
+        { target: sceneTarget!, clear: [0, 0, 0, 1], timer: gpuTimer?.span("scene") },
+        (pass) => {
+          pass.draw(scene);
+          pass.draw(particles);
+        }
+      );
+      frame.pass({ target: bloomA!, timer: gpuTimer?.span("bloom h") }, blurH);
+      frame.pass({ target: bloomB!, timer: gpuTimer?.span("bloom v") }, blurV);
+      frame.pass({ target: output, timer: gpuTimer?.span("composite") }, composite);
 
       layoutCallback?.({ blocks: blockLabels, whales: whaleLabels });
       if (now - lastStatsAt >= STATS_INTERVAL) {
@@ -511,6 +596,7 @@ export function createBlocksRenderer({
     ready,
     pushBlock,
     pushPendingTx,
+    burst,
     pushWhale,
     setFinalized(blockNumber) {
       finalizedNumber = blockNumber;
@@ -528,6 +614,9 @@ export function createBlocksRenderer({
     },
     onStats(callback) {
       statsCallback = callback;
+    },
+    onPerf(callback) {
+      perfCallback = callback;
     },
     dispose() {
       disposed = true;

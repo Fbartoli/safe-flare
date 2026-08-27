@@ -117,6 +117,7 @@ try {
       heat: 0.56,
       flow: 0.65,
       surge: 0.95,
+      epochPulse: 30,
       feeCount: fees.length,
     },
     blocks: {
@@ -124,6 +125,13 @@ try {
         [0.5, 1, 0.95, 4],
         [0.67, 1, 0.6, 2],
         [0.84, 1, 0.35, 6],
+        [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+        [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+      ],
+      art: [
+        [0.137, 0.622, 0.871, 0.344],
+        [0.483, 0.096, 0.751, 0.529],
+        [0.918, 0.271, 0.406, 0.684],
         [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
         [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
       ],
@@ -137,7 +145,14 @@ try {
     fees: { data: feeVecs },
   });
   particles.set({
-    params: { aspect: [ASPECT, 1], time: TIME, blockAt: BLOCK_AT, pressure: 0.65 },
+    params: {
+      aspect: [ASPECT, 1],
+      time: TIME,
+      blockAt: BLOCK_AT,
+      pressure: 0.65,
+      pointer: [0, 0],
+      well: 0,
+    },
   });
 
   const blurTexel = [1 / half[0], 1 / half[1]];

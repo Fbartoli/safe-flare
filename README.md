@@ -16,24 +16,28 @@ The light breathes on its own. Move the pointer to take control of it.
 `/blocks` renders Ethereum as a machine. Real pending transactions
 (`newPendingTransactions` over WebSocket) swarm around a line-art ETH glyph as
 velocity-streaked particles, compress as mempool pressure builds, and get
-eaten when the next block lands. Each real block (`newHeads`) slides out as an
-isometric cube on a conveyor: blob orbs underneath show its EIP-4844 blobs,
-labels link to Etherscan, and finalized blocks crystallize. A countdown arc
-fills over the 12 s slot; when a slot is missed, a hollow ghost cube marks it.
+eaten when the next block lands. The pointer is a gravity well: the swarm
+parts around it. Each real block (`newHeads`) slides out as an isometric cube
+on a conveyor: a hash-seeded constellation glows inside it — no two blocks
+ever share one — blob orbs underneath show its EIP-4844 blobs, labels link to
+Etherscan and expand on hover with gas, base fee, blobs, and the hash.
+Finalized blocks crystallize; a missed slot leaves a hollow ghost cube.
 Sampled transactions above 50 ETH drift in as labeled whale orbs. The frame
 resolves through a real bloom chain with blue-noise grain, and the whole scene
 parallaxes with the pointer. Optional sound: a tick per transaction, a thump
 per block. Plain JSON-RPC — no client library.
 
-The header carries a wall-clock slot/epoch counter, and the countdown arc is
-anchored to beacon genesis, not to head arrival. Each cube is stamped with its
-proposer validator index from the beacon API. A base-fee sparkline
-(`eth_feeHistory`) draws the EIP-1559 sawtooth along the bottom. Near-head
-reorgs flash the replaced cube red. Reduced-motion and coarse-pointer
-preferences are respected; tilt drives the parallax on touch devices.
+The header carries a wall-clock slot/epoch counter; a wide slow ring marks
+each 32-slot epoch boundary. Each cube is stamped with its proposer validator
+index from the beacon API. A base-fee sparkline (`eth_feeHistory`) draws the
+EIP-1559 sawtooth along the bottom. Near-head reorgs flash the replaced cube
+red. The favicon and tab title report every block, even in a background tab.
+Click the glyph. `capture 12s` records one slot to WebM. Reduced-motion and
+coarse-pointer preferences are respected; tilt drives the parallax on touch.
 
-Playground query params: `?whale=0.5` lowers the whale threshold,
-`?ghost=5` shortens the missed-slot timer.
+Query params: `?whale=0.5` lowers the whale threshold, `?ghost=5` shortens
+the missed-slot timer, `?embed=1` strips the chrome for iframes, `?hud=1`
+shows smoothed per-pass GPU milliseconds from timestamp queries.
 
 `public/og.png` is rendered headless by the same shaders:
 `node scripts/render-og.mjs`.

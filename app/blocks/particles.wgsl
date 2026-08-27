@@ -11,6 +11,8 @@ struct Params {
   time: f32,
   blockAt: f32,    // clock time of the last block landing
   pressure: f32,   // mempool fill 0..1; compresses the orbit between blocks
+  pointer: vec2f,  // gravity well position in scene coords
+  well: f32,       // repulsion strength, 0 when no fine pointer moved yet
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -61,6 +63,14 @@ fn positionAt(tt: f32, spawn: f32, s1: f32, s2: f32, s3: f32, aspect: f32) -> ve
       position = GLYPH_CENTER + rotated * (1.0 - pull);
     }
   }
+
+  // Gravity well: the pointer pushes the swarm aside; streaks bend around it
+  // because the velocity is derived from this same path.
+  let fromPointer = position - params.pointer;
+  let d2 = dot(fromPointer, fromPointer);
+  let push = params.well * 0.055 * exp(-d2 * 70.0);
+  position += fromPointer * (push / max(sqrt(d2), 0.02));
+
   return position;
 }
 
