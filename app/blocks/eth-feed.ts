@@ -19,6 +19,12 @@ const HTTP_RPC = "https://ethereum-rpc.publicnode.com";
 const WS_RPC = "wss://ethereum-rpc.publicnode.com";
 const POLL_MS = 4000;
 const WS_GUARD_MS = 8000;
+const BEACON_API = "https://ethereum-beacon-api.publicnode.com";
+
+/** Beacon chain genesis timestamp; slots tick every 12 s from here. */
+export const BEACON_GENESIS = 1606824023;
+export const SLOT_SECONDS = 12;
+export const SLOTS_PER_EPOCH = 32;
 
 interface RawHeader {
   number: string;
@@ -80,6 +86,12 @@ export function createBlockFeed(
     onWhale?(valueEth: number): void;
     /** Latest finalized block number, polled every 30 s. */
     onFinalized?(blockNumber: number): void;
+    /** Proposer validator index, resolved from the beacon chain per block. */
+    onProposer?(blockNumber: number, validatorIndex: number): void;
+    /** A near-head block was replaced by a competing hash. */
+    onReorg?(block: BlockEvent): void;
+    /** Base fees (gwei, oldest first) seeding the sparkline at startup. */
+    onFeeHistory?(baseFeesGwei: number[]): void;
   },
   opts?: { whaleThreshold?: number }
 ): () => void {
@@ -96,12 +108,56 @@ export function createBlockFeed(
   let lastSampleAt = 0;
   let lastRealPendingAt = 0;
   const whaleThreshold = opts?.whaleThreshold ?? DEFAULT_WHALE_ETH;
+  const hashByNumber = new Map<number, string>();
+
+  // Beacon slot = execution timestamp offset from beacon genesis; the headers
+  // endpoint is the light way to the proposer index.
+  const fetchProposer = (event: BlockEvent) => {
+    if (!handlers.onProposer) return;
+    const slot = Math.round((event.timestamp - BEACON_GENESIS) / SLOT_SECONDS);
+    void (async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) {
+          const { promise, resolve } = Promise.withResolvers<void>();
+          setTimeout(resolve, 1500);
+          await promise;
+        }
+        try {
+          const response = await fetch(`${BEACON_API}/eth/v1/beacon/headers/${slot}`);
+          if (!response.ok) continue;
+          const payload = (await response.json()) as {
+            data?: { header?: { message?: { proposer_index?: string } } };
+          };
+          const index = Number(payload.data?.header?.message?.proposer_index);
+          if (Number.isFinite(index) && !disposed) {
+            handlers.onProposer?.(event.number, index);
+            return;
+          }
+        } catch {
+          // retry once, then give up quietly
+        }
+      }
+    })();
+  };
 
   const emit = (event: BlockEvent) => {
-    if (disposed || event.number <= lastNumber) return;
+    if (disposed) return;
+    const known = hashByNumber.get(event.number);
+    if (event.number <= lastNumber) {
+      // Same height, different hash, near the head: a reorg replaced it.
+      if (known && known !== event.hash && lastNumber - event.number < 6) {
+        hashByNumber.set(event.number, event.hash);
+        handlers.onReorg?.(event);
+        fetchProposer(event);
+      }
+      return;
+    }
     lastNumber = event.number;
     lastTxCount = Math.max(1, event.txCount);
+    hashByNumber.set(event.number, event.hash);
+    hashByNumber.delete(event.number - 32);
     handlers.onBlock(event);
+    fetchProposer(event);
   };
 
   // Most arrivals spawn immediately at weight 1; at most one value lookup is
@@ -252,6 +308,12 @@ export function createBlockFeed(
   handlers.onStatus("connecting");
   pollLatest().catch(() => undefined); // seed the UI before the first new head
   pollFinalized();
+  rpc<{ baseFeePerGas?: string[] }>("eth_feeHistory", ["0x33", "latest", []])
+    .then((history) => {
+      const fees = (history.baseFeePerGas ?? []).map((fee) => hex(fee) / 1e9);
+      if (!disposed && fees.length > 0) handlers.onFeeHistory?.(fees);
+    })
+    .catch(() => undefined);
   startWs();
 
   return () => {

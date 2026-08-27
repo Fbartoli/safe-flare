@@ -100,6 +100,14 @@ try {
   slots.write(slotData);
   particles.set({ slots });
 
+  // A synthetic EIP-1559 sawtooth for the sparkline.
+  const fees = Array.from({ length: 52 }, (_, i) =>
+    0.5 + 0.35 * Math.sin(i * 0.35) * Math.exp(-((51 - i) % 17) * 0.06)
+  );
+  const feeVecs = [];
+  for (let i = 0; i < 13; i++) {
+    feeVecs.push([0, 1, 2, 3].map((lane) => fees[i * 4 + lane] ?? 0));
+  }
   scene.set({
     params: {
       aspect: [ASPECT, 1],
@@ -109,19 +117,25 @@ try {
       heat: 0.56,
       flow: 0.65,
       surge: 0.95,
+      slotPhase: 0.72,
+      feeCount: fees.length,
     },
     blocks: {
-      b0: [0.5, 1, 0.95, 4],
-      b1: [0.67, 1, 0.6, 2],
-      b2: [0.84, 1, 0.35, 6],
-      b3: [0, 0, 0, 0],
-      b4: [0, 0, 0, 0], b5: [0, 0, 0, 0], b6: [0, 0, 0, 0],
-      b7: [0, 0, 0, 0], b8: [0, 0, 0, 0], b9: [0, 0, 0, 0],
+      data: [
+        [0.5, 1, 0.95, 4],
+        [0.67, 1, 0.6, 2],
+        [0.84, 1, 0.35, 6],
+        [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+        [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+      ],
     },
     whales: {
-      w0: [-0.42, 0.19, 1, 0.026],
-      w1: [0, 0, 0, 0], w2: [0, 0, 0, 0], w3: [0, 0, 0, 0],
+      data: [
+        [-0.42, 0.19, 1, 0.026],
+        [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+      ],
     },
+    fees: { data: feeVecs },
   });
   particles.set({
     params: { aspect: [ASPECT, 1], time: TIME, blockAt: BLOCK_AT, pressure: 0.65 },

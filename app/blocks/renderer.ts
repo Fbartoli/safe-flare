@@ -4,8 +4,8 @@ import { StorageBuffer } from "vgpu/core";
 
 import { BLUE_NOISE_SIZE, blueNoiseBytes } from "../flare/blue-noise-128";
 import blurWgsl from "../flare/blur.wgsl";
+import { BEACON_GENESIS, SLOT_SECONDS, type BlockEvent } from "./eth-feed";
 import compositeWgsl from "./composite.wgsl";
-import type { BlockEvent } from "./eth-feed";
 import particlesWgsl from "./particles.wgsl";
 import sceneWgsl from "./scene.wgsl";
 
@@ -13,6 +13,7 @@ export interface BlockLabel {
   kind: "block" | "ghost";
   number: number;
   txCount: number;
+  proposer?: number;
   /** Horizontal position as a fraction of the canvas width. */
   u: number;
   /** Vertical position as a fraction of the canvas height. */
@@ -48,6 +49,11 @@ export interface BlocksRenderer {
   /** A sampled whale transaction; becomes a labeled green orb. */
   pushWhale(valueEth: number): void;
   setFinalized(blockNumber: number): void;
+  setProposer(blockNumber: number, validatorIndex: number): void;
+  /** Reorg: replace the cube at this height and flash it red. */
+  replaceBlock(block: BlockEvent): void;
+  /** Seed or extend the base-fee sparkline (gwei, oldest first). */
+  setFeeHistory(baseFeesGwei: number[]): void;
   onLayout(callback: (layout: LayoutFrame) => void): void;
   onStats(callback: (stats: MempoolStats) => void): void;
   dispose(): void;
@@ -59,6 +65,8 @@ interface BlockAnim {
   x: number;
   bornAt: number;
   finalized: boolean;
+  proposer?: number;
+  reorgUntil?: number;
 }
 
 interface WhaleAnim {
@@ -80,7 +88,7 @@ const PARTICLE_SLOTS = 1024;
 const MIN_SPAWN_GAP = 0.01; // seconds between visible spawns; extras only count
 const STATS_INTERVAL = 0.25;
 const STAMP_SECONDS = 0.6;
-const SLOT_SECONDS = 12;
+const FEE_SAMPLES = 52;
 const GHOST_AFTER = SLOT_SECONDS * 1.4;
 const WHALE_HOLD_X = -0.42;
 const BLOOM_STRENGTH = 0.8;
@@ -156,12 +164,33 @@ export function createBlocksRenderer({
   let surge = 0.6;
   let pressure = 0.25;
   let frameIndex = 0;
+  const feesGwei: number[] = [];
+  const reducedMotion =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const coarsePointer =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(pointer: coarse)").matches;
+  const spawnGap = reducedMotion ? MIN_SPAWN_GAP * 4 : MIN_SPAWN_GAP;
 
   const parallax = [0, 0];
   const parallaxTarget = [0, 0];
   const handlePointerMove = (event: PointerEvent) => {
     parallaxTarget[0] = (event.clientX / window.innerWidth) * 2 - 1;
     parallaxTarget[1] = -((event.clientY / window.innerHeight) * 2 - 1);
+  };
+  // Touch devices have no hover; tilt drives the parallax instead.
+  const handleOrientation = (event: DeviceOrientationEvent) => {
+    if (event.gamma === null || event.beta === null) return;
+    parallaxTarget[0] = Math.max(-1, Math.min(1, event.gamma / 30));
+    parallaxTarget[1] = Math.max(-1, Math.min(1, (event.beta - 45) / -30));
+  };
+  // A hidden tab freezes `now`; stale slots would burst on return.
+  const handleVisibility = () => {
+    if (document.visibilityState === "visible") {
+      slotData.fill(0);
+      slotsDirty = true;
+    }
   };
 
   const slotData = new Float32Array(PARTICLE_SLOTS * 2);
@@ -181,7 +210,7 @@ export function createBlocksRenderer({
       arrivalGapEma = arrivalGapEma * 0.9 + gap * 0.1;
     }
     lastArrivalAt = now;
-    if (now - lastSpawnAt < MIN_SPAWN_GAP) return; // counted, not drawn
+    if (now - lastSpawnAt < spawnGap) return; // counted, not drawn
     lastSpawnAt = now;
     slotData[ring * 2] = now;
     slotData[ring * 2 + 1] = weight;
@@ -198,6 +227,8 @@ export function createBlocksRenderer({
     sinceBlock = 0;
     targetHeat = block.gasLimit > 0 ? block.gasUsed / block.gasLimit : 0.4;
     surge = Math.min(1.25, 0.25 + block.txCount / 350);
+    feesGwei.push(block.baseFeeGwei);
+    if (feesGwei.length > FEE_SAMPLES) feesGwei.splice(0, feesGwei.length - FEE_SAMPLES);
     for (const whale of whaleAnims) whale.eatenAt ??= now;
   };
 
@@ -212,13 +243,24 @@ export function createBlocksRenderer({
     if (whaleAnims.length > MAX_WHALES) whaleAnims.pop();
   };
 
+  const replaceBlock = (block: BlockEvent) => {
+    const anim = anims.find((entry) => entry.block?.number === block.number);
+    if (!anim) return;
+    anim.block = block;
+    anim.bornAt = now;
+    anim.reorgUntil = now + 3;
+    anim.proposer = undefined;
+  };
+
   const initialize = async () => {
     gpu = await init({ label: "eth-blocks" });
     if (disposed) {
       gpu.dispose();
       return;
     }
-    const output: Surface = surface(gpu, canvas, { dpr: [1, 2] });
+    const output: Surface = surface(gpu, canvas, {
+      dpr: [1, coarsePointer ? 1.5 : 2],
+    });
     const linearSampler = sampler(gpu, {
       minFilter: "linear",
       magFilter: "linear",
@@ -292,7 +334,11 @@ export function createBlocksRenderer({
       });
     };
 
-    window.addEventListener("pointermove", handlePointerMove);
+    if (!reducedMotion) {
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("deviceorientation", handleOrientation);
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
 
     const time = clock(gpu);
     let lastTime = 0;
@@ -338,7 +384,9 @@ export function createBlocksRenderer({
         const edgeFade = Math.min(1, Math.max(0, (halfWidth + 0.05 - anim.x) / 0.12));
         const scale = stamp * edgeFade;
         const packed =
-          (anim.block?.blobs ?? 0) + (anim.finalized ? 16 : 0);
+          (anim.block?.blobs ?? 0) +
+          (anim.finalized ? 16 : 0) +
+          ((anim.reorgUntil ?? 0) > now ? 32 : 0);
         cubes.push([
           anim.x,
           anim.kind === "ghost" ? -scale : scale,
@@ -349,6 +397,7 @@ export function createBlocksRenderer({
           kind: anim.kind,
           number: anim.block?.number ?? 0,
           txCount: anim.block?.txCount ?? 0,
+          proposer: anim.proposer,
           u: 0.5 + anim.x / aspect,
           v: 0.5 - (CONVEYOR_Y + 0.115),
           opacity: Math.min(1, stamp) * edgeFade,
@@ -401,6 +450,23 @@ export function createBlocksRenderer({
 
       const pulse = Math.min(30, now - lastBlockAt);
       pressure += (Math.min(1, sinceBlock / 250) - pressure) * Math.min(1, dt * 1.2);
+      // The arc is a true slot clock, anchored to beacon genesis wall time.
+      const slotPhase =
+        ((Date.now() / 1000 - BEACON_GENESIS) % SLOT_SECONDS) / SLOT_SECONDS;
+      const feeVecs: number[][] = [];
+      let feeMin = Infinity;
+      let feeMax = -Infinity;
+      for (const fee of feesGwei) {
+        feeMin = Math.min(feeMin, fee);
+        feeMax = Math.max(feeMax, fee);
+      }
+      const feeRange = Math.max(feeMax - feeMin, feeMax * 0.05, 1e-6);
+      for (let i = 0; i < 13; i++) {
+        feeVecs.push([0, 1, 2, 3].map((lane) => {
+          const fee = feesGwei[i * 4 + lane];
+          return fee === undefined ? 0 : (fee - feeMin) / feeRange;
+        }));
+      }
       scene.set({
         params: {
           aspect: [aspect, 1],
@@ -410,17 +476,12 @@ export function createBlocksRenderer({
           heat,
           flow: pressure,
           surge,
+          slotPhase,
+          feeCount: feesGwei.length,
         },
-        blocks: {
-          b0: cubes[0], b1: cubes[1], b2: cubes[2], b3: cubes[3], b4: cubes[4],
-          b5: cubes[5], b6: cubes[6], b7: cubes[7], b8: cubes[8], b9: cubes[9],
-        },
-        whales: {
-          w0: whaleUniform[0],
-          w1: whaleUniform[1],
-          w2: whaleUniform[2],
-          w3: whaleUniform[3],
-        },
+        blocks: { data: cubes },
+        whales: { data: whaleUniform },
+        fees: { data: feeVecs },
       });
       particles.set({
         params: { aspect: [aspect, 1], time: now, blockAt: lastBlockAt, pressure },
@@ -458,6 +519,14 @@ export function createBlocksRenderer({
     setFinalized(blockNumber) {
       finalizedNumber = blockNumber;
     },
+    setProposer(blockNumber, validatorIndex) {
+      const anim = anims.find((entry) => entry.block?.number === blockNumber);
+      if (anim) anim.proposer = validatorIndex;
+    },
+    replaceBlock,
+    setFeeHistory(baseFeesGwei) {
+      feesGwei.splice(0, feesGwei.length, ...baseFeesGwei.slice(-FEE_SAMPLES));
+    },
     onLayout(callback) {
       layoutCallback = callback;
     },
@@ -467,6 +536,8 @@ export function createBlocksRenderer({
     dispose() {
       disposed = true;
       window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("deviceorientation", handleOrientation);
+      document.removeEventListener("visibilitychange", handleVisibility);
       loop?.stop();
       gpu?.dispose();
     },

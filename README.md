@@ -25,6 +25,13 @@ resolves through a real bloom chain with blue-noise grain, and the whole scene
 parallaxes with the pointer. Optional sound: a tick per transaction, a thump
 per block. Plain JSON-RPC — no client library.
 
+The header carries a wall-clock slot/epoch counter, and the countdown arc is
+anchored to beacon genesis, not to head arrival. Each cube is stamped with its
+proposer validator index from the beacon API. A base-fee sparkline
+(`eth_feeHistory`) draws the EIP-1559 sawtooth along the bottom. Near-head
+reorgs flash the replaced cube red. Reduced-motion and coarse-pointer
+preferences are respected; tilt drives the parallax on touch devices.
+
 Playground query params: `?whale=0.5` lowers the whale threshold,
 `?ghost=5` shortens the missed-slot timer.
 

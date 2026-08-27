@@ -3,13 +3,20 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-import { createBlockFeed, type BlockEvent, type FeedStatus } from "./eth-feed";
+import {
+  BEACON_GENESIS,
+  SLOT_SECONDS,
+  SLOTS_PER_EPOCH,
+  createBlockFeed,
+  type BlockEvent,
+  type FeedStatus,
+} from "./eth-feed";
 import {
   createBlocksRenderer,
   type LayoutFrame,
   type MempoolStats,
 } from "./renderer";
-import { createSoundBoard } from "./sound";
+import { createSoundBoard, type SoundBoard } from "./sound";
 
 const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 const EXPLORER = "https://etherscan.io";
@@ -32,6 +39,21 @@ const LABEL_STYLE =
   `position:absolute;transform:translate(-50%,-100%);text-align:center;` +
   `font-family:${MONO};font-size:11px;line-height:1.5;white-space:nowrap;`;
 
+interface SlotClock {
+  slot: number;
+  epoch: number;
+  inEpoch: number;
+}
+
+function slotClock(): SlotClock {
+  const slot = Math.floor((Date.now() / 1000 - BEACON_GENESIS) / SLOT_SECONDS);
+  return {
+    slot,
+    epoch: Math.floor(slot / SLOTS_PER_EPOCH),
+    inEpoch: slot % SLOTS_PER_EPOCH,
+  };
+}
+
 export default function BlocksPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelHostRef = useRef<HTMLDivElement>(null);
@@ -40,7 +62,14 @@ export default function BlocksPage() {
   const [latest, setLatest] = useState<BlockEvent | undefined>();
   const [finalized, setFinalized] = useState<number | undefined>();
   const [soundOn, setSoundOn] = useState(false);
-  const soundRef = useRef<ReturnType<typeof createSoundBoard> | undefined>(undefined);
+  const [slotNow, setSlotNow] = useState<SlotClock | undefined>();
+  const soundRef = useRef<SoundBoard | undefined>(undefined);
+
+  useEffect(() => {
+    setSlotNow(slotClock());
+    const timer = window.setInterval(() => setSlotNow(slotClock()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -73,9 +102,6 @@ export default function BlocksPage() {
             anchor.rel = "noreferrer";
             anchor.style.cssText =
               LABEL_STYLE + `color:#8a92b2;pointer-events:auto;text-decoration:none;`;
-            anchor.innerHTML =
-              `<div style="color:#c7d0f0">#${label.number}</div>` +
-              `<div>${label.txCount} txs</div>`;
             node = anchor;
           } else {
             node = document.createElement("div");
@@ -84,6 +110,20 @@ export default function BlocksPage() {
           }
           labelHost.appendChild(node);
           blockPool.set(key, node);
+        }
+        if (label.kind === "block") {
+          // Content arrives in stages (tx count retry, proposer lookup);
+          // rewrite only when the signature changes.
+          const sig = `${label.number}|${label.txCount}|${label.proposer ?? ""}`;
+          if (node.dataset.sig !== sig) {
+            node.dataset.sig = sig;
+            node.innerHTML =
+              `<div style="color:#c7d0f0">#${label.number}</div>` +
+              `<div>${label.txCount} txs</div>` +
+              (label.proposer !== undefined
+                ? `<div style="color:#5a6180">val ${label.proposer}</div>`
+                : "");
+          }
         }
         node.style.left = `${label.u * 100}%`;
         node.style.top = `${label.v * 100}%`;
@@ -138,6 +178,15 @@ export default function BlocksPage() {
         onFinalized(blockNumber) {
           renderer.setFinalized(blockNumber);
           setFinalized(blockNumber);
+        },
+        onProposer(blockNumber, validatorIndex) {
+          renderer.setProposer(blockNumber, validatorIndex);
+        },
+        onReorg(block) {
+          renderer.replaceBlock(block);
+        },
+        onFeeHistory(baseFeesGwei) {
+          renderer.setFeeHistory(baseFeesGwei);
         },
       },
       { whaleThreshold }
@@ -198,6 +247,11 @@ export default function BlocksPage() {
             : "waiting for the chain…"}
         </div>
         <div ref={statsRef}>mempool warming up…</div>
+        <div>
+          {slotNow
+            ? `slot ${slotNow.slot.toLocaleString("en-US")} · epoch ${slotNow.epoch.toLocaleString("en-US")} (${slotNow.inEpoch}/32)`
+            : "slot syncing…"}
+        </div>
         <div>
           {finalized && latest
             ? `finalized #${finalized} (−${latest.number - finalized})`

@@ -1,7 +1,8 @@
-// Scene layer: background, the Ethereum glyph as rim-lit line art, the slot
-// countdown arc, a pulse ring per block, conveyor cubes (with blob orbs,
-// finality, and missed-slot ghosts), and whale orbs. Outputs linear HDR
-// radiance; tone mapping, vignette, and grain live in the composite pass.
+// Scene layer: background, the Ethereum glyph as rim-lit line art, the
+// wall-clock slot arc, a pulse ring per block, conveyor cubes (with blob
+// orbs, finality, reorgs, and missed-slot ghosts), whale orbs, and the
+// base-fee sparkline. Outputs linear HDR radiance; tone mapping, vignette,
+// and grain live in the composite pass.
 
 struct Params {
   aspect: vec2f,   // (width / height, 1)
@@ -11,33 +12,35 @@ struct Params {
   heat: f32,       // gasUsed / gasLimit of the last block
   flow: f32,       // normalized mempool pressure
   surge: f32,      // last block's tx count, normalized
+  slotPhase: f32,  // wall-clock position inside the 12 s slot, 0..1
+  feeCount: f32,   // valid sparkline samples
 }
 
-// One vec4 per conveyor block: (x, scale, glow, blobs + finalized * 16).
+// One vec4 per conveyor block:
+// (x, scale, glow, blobs + finalized * 16 + reorg * 32).
 // A negative scale marks a missed-slot ghost.
-struct Blocks {
-  b0: vec4f, b1: vec4f, b2: vec4f, b3: vec4f, b4: vec4f,
-  b5: vec4f, b6: vec4f, b7: vec4f, b8: vec4f, b9: vec4f,
-}
+struct Blocks { data: array<vec4f, 10> }
 
 // One vec4 per whale transaction: (x, y, intensity, size).
-struct Whales {
-  w0: vec4f, w1: vec4f, w2: vec4f, w3: vec4f,
-}
+struct Whales { data: array<vec4f, 4> }
+
+// Base fees normalized to 0..1, oldest first, packed four per vec4.
+struct Fees { data: array<vec4f, 13> }
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<uniform> blocks: Blocks;
 @group(0) @binding(2) var<uniform> whales: Whales;
+@group(0) @binding(3) var<uniform> fees: Fees;
 
 const GLYPH_CENTER = vec2f(0.0, 0.10);
 const GLYPH_SCALE = 0.24;
-// Blocks exit on the glyph's equator, through the countdown-arc gate.
+// Blocks exit on the glyph's equator, through the slot-arc gate.
 const CONVEYOR_Y = 0.10;
-const SLOT_SECONDS = 12.0;
 const LINE_COLOR = vec3f(0.62, 0.71, 1.0);
 const CORE_COLOR = vec3f(0.88, 0.92, 1.0);
 const VIOLET = vec3f(0.55, 0.50, 0.95);
 const WHALE_COLOR = vec3f(0.55, 1.0, 0.75);
+const REORG_COLOR = vec3f(1.0, 0.28, 0.32);
 
 fn sdSegment(p: vec2f, a: vec2f, b: vec2f) -> f32 {
   let pa = p - a;
@@ -127,13 +130,12 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
     (0.45 + params.heat * 0.5 + params.flow * 0.35 + blockFlash);
   radiance += CORE_COLOR * glyphLine.x * (0.85 + blockFlash * 0.8);
 
-  // Slot countdown: an arc around the glyph fills over the 12 s slot,
-  // sweeping clockwise from the top.
+  // Slot clock: the arc tracks the true wall-clock slot (anchored to beacon
+  // genesis), sweeping clockwise from the top over each 12 s slot.
   let arm = p - GLYPH_CENTER;
   let arcDistance = abs(length(arm) - 0.36);
   let sweep = fract(atan2(arm.x, arm.y) / 6.28318 + 1.0);
-  let fillFraction = min(params.pulse / SLOT_SECONDS, 1.0);
-  let filled = smoothstep(0.0, 0.012, fillFraction - sweep);
+  let filled = smoothstep(0.0, 0.012, params.slotPhase - sweep);
   let arc = exp(-arcDistance * 220.0);
   radiance += LINE_COLOR * arc * (0.03 + filled * 0.28);
 
@@ -150,18 +152,16 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
   radiance += LINE_COLOR * (conv.x * 0.10 + conv.y * 0.05);
 
   // Blocks on the conveyor.
-  var cubes = array<vec4f, 10>(
-    blocks.b0, blocks.b1, blocks.b2, blocks.b3, blocks.b4,
-    blocks.b5, blocks.b6, blocks.b7, blocks.b8, blocks.b9
-  );
   for (var i = 0; i < 10; i++) {
-    let cube = cubes[i];
+    let cube = blocks.data[i];
     let ghost = cube.y < 0.0;
     let scale = abs(cube.y);
     if (scale < 0.01) { continue; }
     let center = vec2f(cube.x, CONVEYOR_Y);
-    let finalized = cube.w >= 16.0;
-    let blobCount = cube.w - select(0.0, 16.0, finalized);
+    let reorged = cube.w >= 32.0;
+    let flags = cube.w - select(0.0, 32.0, reorged);
+    let finalized = flags >= 16.0;
+    let blobCount = flags - select(0.0, 16.0, finalized);
     let d = cubeDistance(pBelt, center, 0.055 * scale, ghost);
     let line = lineGlow(d, px);
     if (ghost) {
@@ -177,6 +177,10 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
       coreGain = 1.0;
       haloGain = 0.08;
     }
+    if (reorged) {
+      tint = REORG_COLOR;
+      haloGain = max(haloGain, 0.5);
+    }
     radiance += tint * (line.x * coreGain + line.y * haloGain);
     // Blob orbs docked under the cube: the rollup data lane (capped at 8;
     // the header carries the true count).
@@ -190,14 +194,38 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
   }
 
   // Whale transactions: rare, heavy, green.
-  var pods = array<vec4f, 4>(whales.w0, whales.w1, whales.w2, whales.w3);
   for (var i = 0; i < 4; i++) {
-    let whale = pods[i];
+    let whale = whales.data[i];
     if (whale.z < 0.01) { continue; }
     let wd = length(p - whale.xy);
     let core = exp(-wd * wd / (whale.w * whale.w));
     let halo = exp(-wd * 14.0);
     radiance += WHALE_COLOR * (core * 1.6 + halo * 0.35) * whale.z;
+  }
+
+  // Base-fee sparkline along the bottom: the EIP-1559 sawtooth. The band
+  // check keeps the 52-segment loop off every other pixel.
+  let stripLow = -0.47;
+  let stripHigh = -0.35;
+  if (params.feeCount > 1.5 && pGrid.y > stripLow - 0.03 && pGrid.y < stripHigh + 0.04) {
+    var samples = fees.data;
+    let count = params.feeCount;
+    let xw = params.aspect.x * 0.44;
+    var d = 1e5;
+    var last = vec2f(0.0);
+    for (var i = 0; i < 52; i++) {
+      let fi = f32(i);
+      if (fi + 1.5 > count) { break; }
+      let va = samples[i / 4][i % 4];
+      let vb = samples[(i + 1) / 4][(i + 1) % 4];
+      let a2 = vec2f(mix(-xw, xw, fi / (count - 1.0)), mix(stripLow, stripHigh, va));
+      let b2 = vec2f(mix(-xw, xw, (fi + 1.0) / (count - 1.0)), mix(stripLow, stripHigh, vb));
+      d = min(d, sdSegment(pGrid, a2, b2));
+      last = b2;
+    }
+    let line = lineGlow(d, px);
+    radiance += LINE_COLOR * (line.x * 0.22 + line.y * 0.04);
+    radiance += CORE_COLOR * exp(-length(pGrid - last) * 260.0) * 0.6;
   }
 
   return vec4f(radiance, 1.0);
