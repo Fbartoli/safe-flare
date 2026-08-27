@@ -186,9 +186,24 @@ export function createBlockFeed(handlers: {
       }
       if (payload.params.subscription !== headsSubId) return;
       const header = payload.params.result as RawHeader;
-      rpc<string>("eth_getBlockTransactionCountByHash", [header.hash])
-        .then((count) => emit(toEvent(header, hex(count))))
-        .catch(() => emit(toEvent(header, 0)));
+      // The HTTP node can lag the WS head by a moment; a zero count right
+      // after newHeads is almost always that race, not an empty block.
+      void (async () => {
+        let count = 0;
+        for (let attempt = 0; attempt < 2 && count === 0; attempt++) {
+          if (attempt > 0) {
+            const { promise, resolve } = Promise.withResolvers<void>();
+            setTimeout(resolve, 1200);
+            await promise;
+          }
+          count = hex(
+            await rpc<string>("eth_getBlockTransactionCountByHash", [
+              header.hash,
+            ]).catch(() => undefined)
+          );
+        }
+        emit(toEvent(header, count));
+      })();
     };
     ws.onclose = () => {
       wsLive = false;

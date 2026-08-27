@@ -41,7 +41,7 @@ interface BlockAnim {
 }
 
 const MAX_BLOCKS = 10;
-const CONVEYOR_Y = -0.34;
+const CONVEYOR_Y = -0.26;
 const SLOT_START = 0.3;
 const SLOT_SPACING = 0.17;
 const SPAWN_X = 0.05;
@@ -65,6 +65,8 @@ export function createBlocksRenderer({
   let now = 0;
   let heat = 0.4;
   let targetHeat = 0.4;
+  let surge = 0.6;
+  let pressure = 0.25;
 
   const slotData = new Float32Array(PARTICLE_SLOTS * 2);
   let slotsDirty = false;
@@ -98,6 +100,7 @@ export function createBlocksRenderer({
     lastBlockAt = now;
     sinceBlock = 0;
     targetHeat = block.gasLimit > 0 ? block.gasUsed / block.gasLimit : 0.4;
+    surge = Math.min(1.25, 0.25 + block.txCount / 350);
   };
 
   const initialize = async () => {
@@ -111,6 +114,7 @@ export function createBlocksRenderer({
     const particles: Draw = draw(gpu, {
       shader: particlesWgsl,
       instances: PARTICLE_SLOTS,
+      vertices: 6,
       blend: "additive",
       label: "eth-blocks-particles",
     });
@@ -162,17 +166,17 @@ export function createBlocksRenderer({
         slotsDirty = false;
       }
 
-      const pulse = Math.min(10, now - lastBlockAt);
-      const flow = Math.min(1, sinceBlock / 250);
+      const pulse = Math.min(20, now - lastBlockAt);
+      pressure += (Math.min(1, sinceBlock / 250) - pressure) * Math.min(1, dt * 1.2);
       scene.set({
-        params: { aspect: [aspect, 1], time: now, pulse, heat, flow },
+        params: { aspect: [aspect, 1], time: now, pulse, heat, flow: pressure, surge },
         blocks: {
           b0: cubes[0], b1: cubes[1], b2: cubes[2], b3: cubes[3], b4: cubes[4],
           b5: cubes[5], b6: cubes[6], b7: cubes[7], b8: cubes[8], b9: cubes[9],
         },
       });
       particles.set({
-        params: { aspect: [aspect, 1], time: now, blockAt: lastBlockAt },
+        params: { aspect: [aspect, 1], time: now, blockAt: lastBlockAt, pressure },
       });
 
       frame.pass({ target: output, clear: [0, 0, 0, 1] }, (pass) => {

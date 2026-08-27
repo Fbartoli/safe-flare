@@ -8,6 +8,7 @@ struct Params {
   pulse: f32,      // seconds since the last block
   heat: f32,       // gasUsed / gasLimit of the last block
   flow: f32,       // normalized tx inflow
+  surge: f32,      // last block's tx count, normalized
 }
 
 // One vec4 per conveyor block: (x, scale, glow, unused).
@@ -21,7 +22,8 @@ struct Blocks {
 
 const GLYPH_CENTER = vec2f(0.0, 0.10);
 const GLYPH_SCALE = 0.24;
-const CONVEYOR_Y = -0.34;
+const CONVEYOR_Y = -0.26;
+const SLOT_SECONDS = 12.0;
 const LINE_COLOR = vec3f(0.62, 0.71, 1.0);
 const CORE_COLOR = vec3f(0.88, 0.92, 1.0);
 const VIOLET = vec3f(0.55, 0.50, 0.95);
@@ -102,15 +104,25 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32) -> f32 {
   let gd = glyphDistance(p);
   let glyphLine = lineGlow(gd, px);
   let facet = mix(VIOLET, LINE_COLOR, smoothstep(-0.05, 0.15, p.y - GLYPH_CENTER.y));
-  let blockFlash = exp(-params.pulse * 2.6);
+  let blockFlash = exp(-params.pulse * 2.6) * (0.4 + params.surge);
   radiance += facet * glyphLine.y *
     (0.45 + params.heat * 0.5 + params.flow * 0.35 + blockFlash);
   radiance += CORE_COLOR * glyphLine.x * (0.85 + blockFlash * 0.8);
 
+  // Slot countdown: an arc around the glyph fills over the 12 s slot,
+  // sweeping clockwise from the top.
+  let arm = p - GLYPH_CENTER;
+  let arcDistance = abs(length(arm) - 0.36);
+  let sweep = fract(atan2(arm.x, arm.y) / 6.28318 + 1.0);
+  let fillFraction = min(params.pulse / SLOT_SECONDS, 1.0);
+  let filled = smoothstep(0.0, 0.012, fillFraction - sweep);
+  let arc = exp(-arcDistance * 220.0);
+  radiance += LINE_COLOR * arc * (0.03 + filled * 0.28);
+
   // Pulse ring expanding from the glyph on each new block.
   let ringRadius = 0.10 + params.pulse * 0.55;
-  let ring = exp(-abs(length(p - GLYPH_CENTER) - ringRadius) * 70.0) * exp(-params.pulse * 2.1);
-  radiance += VIOLET * ring * 0.9;
+  let ring = exp(-abs(length(arm) - ringRadius) * 70.0) * exp(-params.pulse * 2.1);
+  radiance += VIOLET * ring * (0.4 + params.surge);
 
   // Conveyor line from the glyph to the right edge.
   let convStart = vec2f(0.04, CONVEYOR_Y);
