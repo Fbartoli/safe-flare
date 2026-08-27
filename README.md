@@ -13,13 +13,23 @@ The light breathes on its own. Move the pointer to take control of it.
 
 ## /blocks — Ethereum, live
 
-`/blocks` renders Ethereum as a machine. Transaction particles stream into a
-line-art ETH glyph, and one isometric cube slides out on a conveyor for every
-real mainnet block. The page subscribes to `newHeads` over WebSocket
-(publicnode RPC, HTTP polling fallback), so each cube lands at the real block
-time. Block number, transaction count, gas use, and base fee come from the
-chain; transaction count drives the particle inflow and gas use drives the
-glyph glow. Plain JSON-RPC — no client library.
+`/blocks` renders Ethereum as a machine. Real pending transactions
+(`newPendingTransactions` over WebSocket) swarm around a line-art ETH glyph as
+velocity-streaked particles, compress as mempool pressure builds, and get
+eaten when the next block lands. Each real block (`newHeads`) slides out as an
+isometric cube on a conveyor: blob orbs underneath show its EIP-4844 blobs,
+labels link to Etherscan, and finalized blocks crystallize. A countdown arc
+fills over the 12 s slot; when a slot is missed, a hollow ghost cube marks it.
+Sampled transactions above 50 ETH drift in as labeled whale orbs. The frame
+resolves through a real bloom chain with blue-noise grain, and the whole scene
+parallaxes with the pointer. Optional sound: a tick per transaction, a thump
+per block. Plain JSON-RPC — no client library.
+
+Playground query params: `?whale=0.5` lowers the whale threshold,
+`?ghost=5` shortens the missed-slot timer.
+
+`public/og.png` is rendered headless by the same shaders:
+`node scripts/render-og.mjs`.
 
 ## Stack
 

@@ -9,6 +9,8 @@ export interface BlockEvent {
   gasLimit: number;
   baseFeeGwei: number;
   timestamp: number;
+  /** EIP-4844 blob count carried by this block. */
+  blobs: number;
 }
 
 export type FeedStatus = "connecting" | "live" | "polling" | "error";
@@ -24,6 +26,7 @@ interface RawHeader {
   gasUsed: string;
   gasLimit: string;
   baseFeePerGas?: string;
+  blobGasUsed?: string;
   timestamp: string;
   transactions?: string[];
 }
@@ -46,6 +49,8 @@ async function rpc<T>(method: string, params: unknown[]): Promise<T> {
   return payload.result;
 }
 
+const BLOB_GAS_SIZE = 131072; // 2^17 gas per blob
+
 function toEvent(header: RawHeader, txCount: number): BlockEvent {
   return {
     number: hex(header.number),
@@ -55,18 +60,29 @@ function toEvent(header: RawHeader, txCount: number): BlockEvent {
     gasLimit: hex(header.gasLimit),
     baseFeeGwei: hex(header.baseFeePerGas) / 1e9,
     timestamp: hex(header.timestamp),
+    blobs: Math.round(hex(header.blobGasUsed) / BLOB_GAS_SIZE),
   };
 }
 
 const SAMPLE_GAP_MS = 1500;
 const SYNTH_MIN_RATE = 5; // synthetic arrivals per second floor while polling
+const FINALITY_POLL_MS = 30000;
+const PENDING_SILENCE_MS = 6000;
+const DEFAULT_WHALE_ETH = 50;
 
-export function createBlockFeed(handlers: {
-  onBlock(block: BlockEvent): void;
-  onStatus(status: FeedStatus): void;
-  /** One call per pending transaction; weight in [1, 2.4] scales by ETH value. */
-  onPendingTx(weight: number): void;
-}): () => void {
+export function createBlockFeed(
+  handlers: {
+    onBlock(block: BlockEvent): void;
+    onStatus(status: FeedStatus): void;
+    /** One call per pending transaction; weight in [1, 2.4] scales by ETH value. */
+    onPendingTx(weight: number): void;
+    /** A sampled pending transaction moved at least the whale threshold. */
+    onWhale?(valueEth: number): void;
+    /** Latest finalized block number, polled every 30 s. */
+    onFinalized?(blockNumber: number): void;
+  },
+  opts?: { whaleThreshold?: number }
+): () => void {
   let disposed = false;
   let ws: WebSocket | undefined;
   let wsLive = false;
@@ -78,6 +94,8 @@ export function createBlockFeed(handlers: {
   let headsSubId = "";
   let pendingSubId = "";
   let lastSampleAt = 0;
+  let lastRealPendingAt = 0;
+  const whaleThreshold = opts?.whaleThreshold ?? DEFAULT_WHALE_ETH;
 
   const emit = (event: BlockEvent) => {
     if (disposed || event.number <= lastNumber) return;
@@ -91,6 +109,8 @@ export function createBlockFeed(handlers: {
   const emitPending = (hash: string) => {
     if (disposed) return;
     const nowMs = Date.now();
+    lastRealPendingAt = nowMs;
+    if (synthTimer !== undefined && wsLive) stopSynth();
     if (nowMs - lastSampleAt < SAMPLE_GAP_MS) {
       handlers.onPendingTx(1);
       return;
@@ -99,6 +119,7 @@ export function createBlockFeed(handlers: {
     rpc<{ value?: string }>("eth_getTransactionByHash", [hash])
       .then((tx) => {
         const eth = hex(tx?.value) / 1e18;
+        if (eth >= whaleThreshold) handlers.onWhale?.(eth);
         handlers.onPendingTx(1 + Math.min(1.4, Math.log10(1 + eth) * 1.2));
       })
       .catch(() => handlers.onPendingTx(1));
@@ -212,14 +233,33 @@ export function createBlockFeed(handlers: {
     ws.onerror = () => ws?.close();
   };
 
+  // Finalized head, and a watchdog for WS endpoints that accept the
+  // newPendingTransactions subscription but never deliver.
+  const pollFinalized = () => {
+    rpc<RawHeader>("eth_getBlockByNumber", ["finalized", false])
+      .then((header) => {
+        if (!disposed) handlers.onFinalized?.(hex(header.number));
+      })
+      .catch(() => undefined);
+  };
+  const finalityTimer = window.setInterval(pollFinalized, FINALITY_POLL_MS);
+  const silenceTimer = window.setInterval(() => {
+    if (wsLive && Date.now() - lastRealPendingAt > PENDING_SILENCE_MS) {
+      startSynth();
+    }
+  }, PENDING_SILENCE_MS / 2);
+
   handlers.onStatus("connecting");
   pollLatest().catch(() => undefined); // seed the UI before the first new head
+  pollFinalized();
   startWs();
 
   return () => {
     disposed = true;
     clearTimeout(guardTimer);
     clearInterval(pollTimer);
+    clearInterval(finalityTimer);
+    clearInterval(silenceTimer);
     stopSynth();
     ws?.close();
   };

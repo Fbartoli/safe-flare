@@ -1,24 +1,33 @@
-// Fullscreen scene: background, the Ethereum glyph as rim-lit line art, a
-// pulse ring on each new block, and up to ten isometric block cubes sliding
-// out along a conveyor line. All shapes are segment SDFs.
+// Scene layer: background, the Ethereum glyph as rim-lit line art, the slot
+// countdown arc, a pulse ring per block, conveyor cubes (with blob orbs,
+// finality, and missed-slot ghosts), and whale orbs. Outputs linear HDR
+// radiance; tone mapping, vignette, and grain live in the composite pass.
 
 struct Params {
   aspect: vec2f,   // (width / height, 1)
+  parallax: vec2f, // pointer offset in [-1, 1], eased
   time: f32,
   pulse: f32,      // seconds since the last block
   heat: f32,       // gasUsed / gasLimit of the last block
-  flow: f32,       // normalized tx inflow
+  flow: f32,       // normalized mempool pressure
   surge: f32,      // last block's tx count, normalized
 }
 
-// One vec4 per conveyor block: (x, scale, glow, unused).
+// One vec4 per conveyor block: (x, scale, glow, blobs + finalized * 16).
+// A negative scale marks a missed-slot ghost.
 struct Blocks {
   b0: vec4f, b1: vec4f, b2: vec4f, b3: vec4f, b4: vec4f,
   b5: vec4f, b6: vec4f, b7: vec4f, b8: vec4f, b9: vec4f,
 }
 
+// One vec4 per whale transaction: (x, y, intensity, size).
+struct Whales {
+  w0: vec4f, w1: vec4f, w2: vec4f, w3: vec4f,
+}
+
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<uniform> blocks: Blocks;
+@group(0) @binding(2) var<uniform> whales: Whales;
 
 const GLYPH_CENTER = vec2f(0.0, 0.10);
 const GLYPH_SCALE = 0.24;
@@ -27,6 +36,7 @@ const SLOT_SECONDS = 12.0;
 const LINE_COLOR = vec3f(0.62, 0.71, 1.0);
 const CORE_COLOR = vec3f(0.88, 0.92, 1.0);
 const VIOLET = vec3f(0.55, 0.50, 0.95);
+const WHALE_COLOR = vec3f(0.55, 1.0, 0.75);
 
 fn sdSegment(p: vec2f, a: vec2f, b: vec2f) -> f32 {
   let pa = p - a;
@@ -46,14 +56,14 @@ fn glyphDistance(p: vec2f) -> f32 {
   let q = (p - GLYPH_CENTER) / GLYPH_SCALE;
   // Upper diamond with a center crease, then the lower pyramid.
   var a = array<vec2f, 8>(
-    vec2f(0.0, 1.0),    // apex -> left
-    vec2f(0.0, 1.0),    // apex -> right
-    vec2f(-0.60, -0.02), // left -> waist bottom
-    vec2f(0.60, -0.02),  // right -> waist bottom
-    vec2f(0.0, 1.0),    // apex -> waist bottom (crease)
-    vec2f(-0.60, -0.18), // lower left -> bottom apex
-    vec2f(0.60, -0.18),  // lower right -> bottom apex
-    vec2f(0.0, -0.50)   // lower crease -> bottom apex
+    vec2f(0.0, 1.0),
+    vec2f(0.0, 1.0),
+    vec2f(-0.60, -0.02),
+    vec2f(0.60, -0.02),
+    vec2f(0.0, 1.0),
+    vec2f(-0.60, -0.18),
+    vec2f(0.60, -0.18),
+    vec2f(0.0, -0.50)
   );
   var b = array<vec2f, 8>(
     vec2f(-0.60, -0.02),
@@ -73,7 +83,8 @@ fn glyphDistance(p: vec2f) -> f32 {
 }
 
 // Isometric cube outline: pointy-top hexagon plus the three inner "Y" edges.
-fn cubeDistance(p: vec2f, center: vec2f, size: f32) -> f32 {
+// Ghosts keep the silhouette but drop the inner edges.
+fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
   var v: array<vec2f, 6>;
   for (var k = 0; k < 6; k++) {
     let angle = radians(90.0 + 60.0 * f32(k));
@@ -83,19 +94,25 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32) -> f32 {
   for (var k = 0; k < 6; k++) {
     d = min(d, sdSegment(p, v[k], v[(k + 1) % 6]));
   }
-  d = min(d, sdSegment(p, center, v[1]));
-  d = min(d, sdSegment(p, center, v[3]));
-  d = min(d, sdSegment(p, center, v[5]));
+  if (!ghost) {
+    d = min(d, sdSegment(p, center, v[1]));
+    d = min(d, sdSegment(p, center, v[3]));
+    d = min(d, sdSegment(p, center, v[5]));
+  }
   return d;
 }
 
 @fragment fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
-  let p = vec2f((uv.x - 0.5) * params.aspect.x, 0.5 - uv.y);
-  let px = fwidth(p.x);
+  let base = vec2f((uv.x - 0.5) * params.aspect.x, 0.5 - uv.y);
+  // Parallax layers: the far grid drifts more than the near machinery.
+  let pGrid = base + params.parallax * 0.030;
+  let p = base + params.parallax * 0.012;
+  let pBelt = base + params.parallax * 0.020;
+  let px = fwidth(base.x);
   var radiance = vec3f(0.0);
 
-  // Faint grid and vignette.
-  let cell = abs(fract(p * 8.0 + 0.5) - 0.5);
+  // Faint grid.
+  let cell = abs(fract(pGrid * 8.0 + 0.5) - 0.5);
   let grid = smoothstep(0.06, 0.0, min(cell.x, cell.y));
   radiance += vec3f(0.05, 0.07, 0.13) * grid * 0.16;
 
@@ -127,7 +144,7 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32) -> f32 {
   // Conveyor line from the glyph to the right edge.
   let convStart = vec2f(0.04, CONVEYOR_Y);
   let convEnd = vec2f(params.aspect.x * 0.5 + 0.2, CONVEYOR_Y);
-  let cd = sdSegment(p, convStart, convEnd);
+  let cd = sdSegment(pBelt, convStart, convEnd);
   let conv = lineGlow(cd, px);
   radiance += LINE_COLOR * (conv.x * 0.10 + conv.y * 0.05);
 
@@ -138,15 +155,49 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32) -> f32 {
   );
   for (var i = 0; i < 10; i++) {
     let cube = cubes[i];
-    if (cube.y < 0.01) { continue; }
-    let d = cubeDistance(p, vec2f(cube.x, CONVEYOR_Y), 0.055 * cube.y);
+    let ghost = cube.y < 0.0;
+    let scale = abs(cube.y);
+    if (scale < 0.01) { continue; }
+    let center = vec2f(cube.x, CONVEYOR_Y);
+    let finalized = cube.w >= 16.0;
+    let blobCount = cube.w - select(0.0, 16.0, finalized);
+    let d = cubeDistance(pBelt, center, 0.055 * scale, ghost);
     let line = lineGlow(d, px);
-    let tint = mix(LINE_COLOR * 0.5, CORE_COLOR, cube.z);
-    radiance += tint * (line.x * (0.25 + cube.z * 0.75) + line.y * cube.z * 0.7);
+    if (ghost) {
+      radiance += LINE_COLOR * 0.35 * (line.x * 0.30 + line.y * 0.06);
+      continue;
+    }
+    var tint = mix(LINE_COLOR * 0.5, CORE_COLOR, cube.z);
+    var coreGain = 0.25 + cube.z * 0.75;
+    var haloGain = cube.z * 0.7;
+    if (finalized) {
+      // Crystallized: solid bright edges, almost no atmosphere.
+      tint = CORE_COLOR;
+      coreGain = 1.0;
+      haloGain = 0.08;
+    }
+    radiance += tint * (line.x * coreGain + line.y * haloGain);
+    // Blob orbs docked under the cube: the rollup data lane (capped at 8;
+    // the header carries the true count).
+    for (var k = 0; k < 8; k++) {
+      if (f32(k) >= blobCount) { break; }
+      let orb = center +
+        vec2f((f32(k) - (min(blobCount, 8.0) - 1.0) * 0.5) * 0.022, -0.085 * scale - 0.028);
+      let od = length(pBelt - orb);
+      radiance += VIOLET * exp(-od * 260.0) * (0.5 + cube.z * 0.6);
+    }
   }
 
-  // Vignette and filmic-ish resolve.
-  let vignette = smoothstep(1.25, 0.35, length(p * vec2f(0.85, 1.35)));
-  let color = (vec3f(1.0) - exp(-radiance * 1.4)) * vignette;
-  return vec4f(color, 1.0);
+  // Whale transactions: rare, heavy, green.
+  var pods = array<vec4f, 4>(whales.w0, whales.w1, whales.w2, whales.w3);
+  for (var i = 0; i < 4; i++) {
+    let whale = pods[i];
+    if (whale.z < 0.01) { continue; }
+    let wd = length(p - whale.xy);
+    let core = exp(-wd * wd / (whale.w * whale.w));
+    let halo = exp(-wd * 14.0);
+    radiance += WHALE_COLOR * (core * 1.6 + halo * 0.35) * whale.z;
+  }
+
+  return vec4f(radiance, 1.0);
 }

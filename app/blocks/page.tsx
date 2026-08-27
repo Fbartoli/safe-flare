@@ -4,10 +4,15 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { createBlockFeed, type BlockEvent, type FeedStatus } from "./eth-feed";
-import { createBlocksRenderer, type BlockLabel } from "./renderer";
+import {
+  createBlocksRenderer,
+  type LayoutFrame,
+  type MempoolStats,
+} from "./renderer";
+import { createSoundBoard } from "./sound";
 
-const MONO =
-  "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+const EXPLORER = "https://etherscan.io";
 
 const STATUS_TEXT: Record<FeedStatus, string> = {
   connecting: "connecting",
@@ -23,73 +28,126 @@ const STATUS_COLOR: Record<FeedStatus, string> = {
   error: "#e05c5c",
 };
 
+const LABEL_STYLE =
+  `position:absolute;transform:translate(-50%,-100%);text-align:center;` +
+  `font-family:${MONO};font-size:11px;line-height:1.5;white-space:nowrap;`;
+
 export default function BlocksPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const labelHostRef = useRef<HTMLDivElement>(null);
   const statsRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<FeedStatus>("connecting");
   const [latest, setLatest] = useState<BlockEvent | undefined>();
+  const [finalized, setFinalized] = useState<number | undefined>();
+  const [soundOn, setSoundOn] = useState(false);
+  const soundRef = useRef<ReturnType<typeof createSoundBoard> | undefined>(undefined);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     const labelHost = labelHostRef.current;
     if (!canvas || !labelHost) return;
 
-    const renderer = createBlocksRenderer({ canvas });
+    // Playground hooks: ?whale=0.5 lowers the whale threshold,
+    // ?ghost=5 shortens the missed-slot timer.
+    const query = new URLSearchParams(window.location.search);
+    const whaleThreshold = Number(query.get("whale")) || undefined;
+    const ghostAfter = Number(query.get("ghost")) || undefined;
+
+    const sound = createSoundBoard();
+    soundRef.current = sound;
+    const renderer = createBlocksRenderer({ canvas, ghostAfter });
     void renderer.ready;
 
-    const labelPool = new Map<number, HTMLDivElement>();
-    renderer.onLayout((labels: BlockLabel[]) => {
-      const seen = new Set<number>();
-      for (const label of labels) {
-        seen.add(label.number);
-        let node = labelPool.get(label.number);
+    const blockPool = new Map<string, HTMLElement>();
+    renderer.onLayout((layout: LayoutFrame) => {
+      const seen = new Set<string>();
+      for (const label of layout.blocks) {
+        const key = label.kind === "ghost" ? `g${label.number}-${label.u.toFixed(3)}` : `b${label.number}`;
+        seen.add(key);
+        let node = blockPool.get(key);
         if (!node) {
-          node = document.createElement("div");
-          node.style.cssText =
-            `position:absolute;transform:translate(-50%,-100%);text-align:center;` +
-            `font-family:${MONO};font-size:11px;line-height:1.5;color:#8a92b2;` +
-            `pointer-events:none;white-space:nowrap;`;
-          node.innerHTML =
-            `<div style="color:#c7d0f0">#${label.number}</div>` +
-            `<div>${label.txCount} txs</div>`;
+          if (label.kind === "block") {
+            const anchor = document.createElement("a");
+            anchor.href = `${EXPLORER}/block/${label.number}`;
+            anchor.target = "_blank";
+            anchor.rel = "noreferrer";
+            anchor.style.cssText =
+              LABEL_STYLE + `color:#8a92b2;pointer-events:auto;text-decoration:none;`;
+            anchor.innerHTML =
+              `<div style="color:#c7d0f0">#${label.number}</div>` +
+              `<div>${label.txCount} txs</div>`;
+            node = anchor;
+          } else {
+            node = document.createElement("div");
+            node.style.cssText = LABEL_STYLE + `color:#5a6180;pointer-events:none;`;
+            node.innerHTML = `<div>slot missed</div>`;
+          }
           labelHost.appendChild(node);
-          labelPool.set(label.number, node);
+          blockPool.set(key, node);
         }
         node.style.left = `${label.u * 100}%`;
         node.style.top = `${label.v * 100}%`;
         node.style.opacity = String(label.opacity);
       }
-      for (const [number, node] of labelPool) {
-        if (!seen.has(number)) {
+      for (const label of layout.whales) {
+        const key = `w${label.id}`;
+        seen.add(key);
+        let node = blockPool.get(key);
+        if (!node) {
+          node = document.createElement("div");
+          node.style.cssText =
+            LABEL_STYLE + `color:#8dffbe;pointer-events:none;font-weight:600;`;
+          node.textContent = label.text;
+          labelHost.appendChild(node);
+          blockPool.set(key, node);
+        }
+        node.style.left = `${label.u * 100}%`;
+        node.style.top = `${label.v * 100}%`;
+        node.style.opacity = String(label.opacity);
+      }
+      for (const [key, node] of blockPool) {
+        if (!seen.has(key)) {
           node.remove();
-          labelPool.delete(number);
+          blockPool.delete(key);
         }
       }
     });
 
-    renderer.onStats((stats) => {
+    renderer.onStats((stats: MempoolStats) => {
       if (statsRef.current) {
         statsRef.current.textContent =
           `mempool +${stats.sinceBlock} since block · ~${stats.perSecond.toFixed(1)} tx/s`;
       }
     });
 
-    const stopFeed = createBlockFeed({
-      onBlock(block) {
-        renderer.pushBlock(block);
-        setLatest(block);
+    const stopFeed = createBlockFeed(
+      {
+        onBlock(block) {
+          renderer.pushBlock(block);
+          setLatest(block);
+          sound.thump(Math.min(1, block.txCount / 400));
+        },
+        onStatus: setStatus,
+        onPendingTx(weight) {
+          renderer.pushPendingTx(weight);
+          sound.tick();
+        },
+        onWhale(valueEth) {
+          renderer.pushWhale(valueEth);
+        },
+        onFinalized(blockNumber) {
+          renderer.setFinalized(blockNumber);
+          setFinalized(blockNumber);
+        },
       },
-      onStatus: setStatus,
-      onPendingTx(weight) {
-        renderer.pushPendingTx(weight);
-      },
-    });
+      { whaleThreshold }
+    );
 
     return () => {
       stopFeed();
       renderer.dispose();
-      for (const node of labelPool.values()) node.remove();
+      sound.dispose();
+      for (const node of blockPool.values()) node.remove();
     };
   }, []);
 
@@ -110,7 +168,10 @@ export default function BlocksPage() {
         ref={canvasRef}
         style={{ display: "block", height: "100%", width: "100%" }}
       />
-      <div ref={labelHostRef} style={{ position: "absolute", inset: 0 }} />
+      <div
+        ref={labelHostRef}
+        style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+      />
       <header
         style={{
           position: "absolute",
@@ -132,25 +193,47 @@ export default function BlocksPage() {
         </div>
         <div>
           {latest
-            ? `#${latest.number} · ${latest.txCount} txs · gas ${gasPercent}% · base ${latest.baseFeeGwei.toFixed(2)} gwei`
+            ? `#${latest.number} · ${latest.txCount} txs · gas ${gasPercent}% · base ${latest.baseFeeGwei.toFixed(2)} gwei` +
+              (latest.blobs > 0 ? ` · ${latest.blobs} blobs` : "")
             : "waiting for the chain…"}
         </div>
         <div ref={statsRef}>mempool warming up…</div>
+        <div>
+          {finalized && latest
+            ? `finalized #${finalized} (−${latest.number - finalized})`
+            : "finality pending…"}
+        </div>
       </header>
-      <Link
-        href="/"
+      <div
         style={{
           position: "absolute",
           top: 16,
           right: 20,
+          display: "flex",
+          gap: 16,
           fontFamily: MONO,
           fontSize: 12,
-          color: "#8a92b2",
-          textDecoration: "none",
         }}
       >
-        ← safe flare
-      </Link>
+        <button
+          type="button"
+          onClick={() => setSoundOn(soundRef.current?.toggle() ?? false)}
+          style={{
+            background: "none",
+            border: "none",
+            padding: 0,
+            fontFamily: MONO,
+            fontSize: 12,
+            color: soundOn ? "#c7d0f0" : "#8a92b2",
+            cursor: "pointer",
+          }}
+        >
+          sound: {soundOn ? "on" : "off"}
+        </button>
+        <Link href="/" style={{ color: "#8a92b2", textDecoration: "none" }}>
+          ← safe flare
+        </Link>
+      </div>
     </main>
   );
 }
