@@ -12,7 +12,6 @@ struct Params {
   heat: f32,       // gasUsed / gasLimit of the last block
   flow: f32,       // normalized mempool pressure
   surge: f32,      // last block's tx count, normalized
-  slotPhase: f32,  // wall-clock position inside the 12 s slot, 0..1
   feeCount: f32,   // valid sparkline samples
 }
 
@@ -130,14 +129,7 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
     (0.45 + params.heat * 0.5 + params.flow * 0.35 + blockFlash);
   radiance += CORE_COLOR * glyphLine.x * (0.85 + blockFlash * 0.8);
 
-  // Slot clock: the arc tracks the true wall-clock slot (anchored to beacon
-  // genesis), sweeping clockwise from the top over each 12 s slot.
   let arm = p - GLYPH_CENTER;
-  let arcDistance = abs(length(arm) - 0.36);
-  let sweep = fract(atan2(arm.x, arm.y) / 6.28318 + 1.0);
-  let filled = smoothstep(0.0, 0.012, params.slotPhase - sweep);
-  let arc = exp(-arcDistance * 220.0);
-  radiance += LINE_COLOR * arc * (0.03 + filled * 0.28);
 
   // Pulse ring expanding from the glyph on each new block.
   let ringRadius = 0.10 + params.pulse * 0.55;

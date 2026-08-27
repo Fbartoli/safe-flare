@@ -4,7 +4,7 @@ import { StorageBuffer } from "vgpu/core";
 
 import { BLUE_NOISE_SIZE, blueNoiseBytes } from "../flare/blue-noise-128";
 import blurWgsl from "../flare/blur.wgsl";
-import { BEACON_GENESIS, SLOT_SECONDS, type BlockEvent } from "./eth-feed";
+import { SLOT_SECONDS, type BlockEvent } from "./eth-feed";
 import compositeWgsl from "./composite.wgsl";
 import particlesWgsl from "./particles.wgsl";
 import sceneWgsl from "./scene.wgsl";
@@ -450,9 +450,6 @@ export function createBlocksRenderer({
 
       const pulse = Math.min(30, now - lastBlockAt);
       pressure += (Math.min(1, sinceBlock / 250) - pressure) * Math.min(1, dt * 1.2);
-      // The arc is a true slot clock, anchored to beacon genesis wall time.
-      const slotPhase =
-        ((Date.now() / 1000 - BEACON_GENESIS) % SLOT_SECONDS) / SLOT_SECONDS;
       const feeVecs: number[][] = [];
       let feeMin = Infinity;
       let feeMax = -Infinity;
@@ -476,7 +473,6 @@ export function createBlocksRenderer({
           heat,
           flow: pressure,
           surge,
-          slotPhase,
           feeCount: feesGwei.length,
         },
         blocks: { data: cubes },

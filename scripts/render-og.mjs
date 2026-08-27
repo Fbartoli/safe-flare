@@ -117,7 +117,6 @@ try {
       heat: 0.56,
       flow: 0.65,
       surge: 0.95,
-      slotPhase: 0.72,
       feeCount: fees.length,
     },
     blocks: {
