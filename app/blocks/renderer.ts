@@ -72,10 +72,10 @@ interface WhaleAnim {
 const MAX_BLOCKS = 10;
 const MAX_WHALES = 4;
 const GLYPH_CENTER: readonly [number, number] = [0, 0.1];
-const CONVEYOR_Y = -0.26;
-const SLOT_START = 0.3;
+const CONVEYOR_Y = 0.1; // the glyph's equator
+const SLOT_START = 0.46; // first slot clears the 0.36 countdown arc
 const SLOT_SPACING = 0.17;
-const SPAWN_X = 0.05;
+const SPAWN_X = 0.18; // cubes emerge at the glyph's right edge
 const PARTICLE_SLOTS = 1024;
 const MIN_SPAWN_GAP = 0.01; // seconds between visible spawns; extras only count
 const STATS_INTERVAL = 0.25;

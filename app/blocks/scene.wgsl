@@ -31,7 +31,8 @@ struct Whales {
 
 const GLYPH_CENTER = vec2f(0.0, 0.10);
 const GLYPH_SCALE = 0.24;
-const CONVEYOR_Y = -0.26;
+// Blocks exit on the glyph's equator, through the countdown-arc gate.
+const CONVEYOR_Y = 0.10;
 const SLOT_SECONDS = 12.0;
 const LINE_COLOR = vec3f(0.62, 0.71, 1.0);
 const CORE_COLOR = vec3f(0.88, 0.92, 1.0);
@@ -142,7 +143,7 @@ fn cubeDistance(p: vec2f, center: vec2f, size: f32, ghost: bool) -> f32 {
   radiance += VIOLET * ring * (0.4 + params.surge);
 
   // Conveyor line from the glyph to the right edge.
-  let convStart = vec2f(0.04, CONVEYOR_Y);
+  let convStart = vec2f(0.17, CONVEYOR_Y);
   let convEnd = vec2f(params.aspect.x * 0.5 + 0.2, CONVEYOR_Y);
   let cd = sdSegment(pBelt, convStart, convEnd);
   let conv = lineGlow(cd, px);
