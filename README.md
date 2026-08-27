@@ -11,6 +11,16 @@ The renderer draws the Safe symbol as line art and lights it with a multi-pass p
 
 The light breathes on its own. Move the pointer to take control of it.
 
+## /blocks — Ethereum, live
+
+`/blocks` renders Ethereum as a machine. Transaction particles stream into a
+line-art ETH glyph, and one isometric cube slides out on a conveyor for every
+real mainnet block. The page subscribes to `newHeads` over WebSocket
+(publicnode RPC, HTTP polling fallback), so each cube lands at the real block
+time. Block number, transaction count, gas use, and base fee come from the
+chain; transaction count drives the particle inflow and gas use drives the
+glyph glow. Plain JSON-RPC — no client library.
+
 ## Stack
 
 - [Next.js 16](https://nextjs.org/) (App Router, Turbopack)
